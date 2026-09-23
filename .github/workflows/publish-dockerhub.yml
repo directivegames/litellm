@@ -1,0 +1,106 @@
+# Publish the primary proxy image to Docker Hub as directivegames/litellm.
+# Dispatch "Publish Docker Hub". It reads image_tag and git_ref.
+# Secrets on directivegames/litellm: DOCKERHUB_USERNAME, DOCKERHUB_TOKEN.
+
+name: Publish Docker Hub
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Tag to push (for example v1.102.0)
+        required: true
+        type: string
+      git_ref:
+        description: Git ref to build. Empty uses the branch this workflow runs on.
+        required: false
+        type: string
+        default: ""
+      dry_run:
+        description: Build only; skip push
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-dockerhub-${{ github.event.inputs.image_tag }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: directivegames/litellm
+
+jobs:
+  publish:
+    name: Build and push
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - name: Confirm repository
+        if: github.repository != 'directivegames/litellm'
+        run: |
+          echo "::error::This workflow only pushes directivegames/litellm from directivegames/litellm"
+          exit 1
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.git_ref != '' && github.event.inputs.git_ref || github.ref }}
+          fetch-depth: 1
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        if: github.event.inputs.dry_run != 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Image tags
+        id: meta
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ github.event.inputs.image_tag }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${IMAGE_TAG}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+            echo "::error::image_tag is not a valid Docker tag"
+            exit 1
+          fi
+          sha="$(git rev-parse --short HEAD)"
+          tags="${IMAGE}:${IMAGE_TAG},${IMAGE}:${sha}"
+          {
+            echo "tags=${tags}"
+            echo "sha=${sha}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Will publish: ${tags}"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: ${{ github.event.inputs.dry_run != 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          # amd64 for general hosts; arm64 because the gateway deploy runner pulls arm64.
+          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha,scope=litellm
+          cache-to: type=gha,mode=max,scope=litellm
+
+      - name: Summary
+        shell: bash
+        run: |
+          {
+            echo "### ${IMAGE}"
+            echo ""
+            echo "- tags: \`${{ steps.meta.outputs.tags }}\`"
+            echo "- sha: \`${{ steps.meta.outputs.sha }}\`"
+            echo "- dry_run: \`${{ github.event.inputs.dry_run }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
