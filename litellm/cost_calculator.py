@@ -161,6 +161,11 @@ _VIDEO_CALL_TYPES: Final = frozenset(
         CallTypes.avideo_edit.value,
         CallTypes.video_remix.value,
         CallTypes.avideo_remix.value,
+        # These providers know the price when the job finishes, not when it is created.
+        CallTypes.video_retrieve.value,
+        CallTypes.avideo_retrieve.value,
+        "video_status",
+        "avideo_status",
     }
 )
 
@@ -1530,7 +1535,9 @@ def completion_cost(
                             video_resolution = str(_vr).strip().lower()
                         video_count = _vc if isinstance(_vc, int) and not isinstance(_vc, bool) and _vc > 1 else 1
 
-                        if _video_model_info is None and provider_reported_cost is not None:
+                        # A deployment video rate still wins. model_info without one must not hide
+                        # the dollar amount the adapter computed from the finished job.
+                        if provider_reported_cost is not None and not _video_model_info_has_rate(_video_model_info):
                             return float(provider_reported_cost)
 
                         if duration_seconds is not None:
@@ -2339,6 +2346,15 @@ def default_image_cost_calculator(
         return cost_info["input_cost_per_pixel"] * height * width * n
     else:
         raise Exception(f"No pricing information found for model {model}. Tried checking {models_to_check}")
+
+
+def _video_model_info_has_rate(model_info: ModelInfo | None) -> bool:
+    """True when this deployment sets its own video price, which then wins over a reported cost."""
+    if not isinstance(model_info, Mapping):
+        return False
+    if model_info.get("output_cost_per_video_per_second") is not None:
+        return True
+    return model_info.get("output_cost_per_second") is not None
 
 
 def default_video_cost_calculator(
