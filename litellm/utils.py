@@ -9719,6 +9719,18 @@ class ProviderConfigManager:
             return get_hosted_vllm_video_config(model)
         elif LlmProviders.EDENAI == provider:
             return litellm.EdenAIVideoConfig()
+        elif LlmProviders.MINIMAX == provider:
+            from litellm.llms.minimax.videos.transformation import MinimaxVideoConfig
+
+            return MinimaxVideoConfig()
+        elif LlmProviders.BYTEPLUS == provider:
+            from litellm.llms.byteplus.videos.transformation import BytePlusVideoConfig
+
+            return BytePlusVideoConfig()
+        elif LlmProviders.OPENROUTER == provider:
+            from litellm.llms.openrouter.videos.transformation import OpenRouterVideoConfig
+
+            return OpenRouterVideoConfig()
         return None
 
     @staticmethod

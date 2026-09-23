@@ -4024,6 +4024,7 @@ class LlmProviders(str, Enum):
     CLARIFAI = "clarifai"
     ANTHROPIC = "anthropic"
     ANTHROPIC_TEXT = "anthropic_text"
+    BYTEPLUS = "byteplus"
     BYTEZ = "bytez"
     REPLICATE = "replicate"
     REDUCTO = "reducto"
