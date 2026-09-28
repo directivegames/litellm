@@ -40,8 +40,11 @@ import litellm.proxy.video_endpoints.endpoints as endpoints
 from litellm.proxy._types import UserAPIKeyAuth
 from litellm.proxy.common_request_processing import ProxyBaseLLMRequestProcessing
 from litellm.proxy.utils import ProxyLogging
+from litellm.proxy.video_endpoints.utils import encode_video_id_in_response
 from litellm.router import Router
+from litellm.types.videos.main import VideoObject
 from litellm.types.videos.utils import (
+    decode_video_id_with_provider,
     encode_character_id_with_provider,
     encode_video_id_with_provider,
 )
@@ -701,3 +704,82 @@ async def test_extension__extracts_nested_video_id_full_contract(harness):
         "custom_llm_provider": "azure",
         "model": "azure-sora",
     }
+
+
+# =========================================================================== #
+#   Returned video ids record the router deployment id                        #
+# =========================================================================== #
+
+
+def _video(video_id: str, model_id: str | None = None) -> VideoObject:
+    video = VideoObject(id=video_id, object="video", status="queued")
+    if model_id is not None:
+        video._hidden_params = {"model_id": model_id}
+    return video
+
+
+@pytest.mark.asyncio
+async def test_generation__returned_id_records_the_deployment_id(harness):
+    adapter_id = encode_video_id_with_provider("gen-1", "openrouter", "minimax/hailuo-3")
+    harness.base_process.return_value = _video(adapter_id, model_id="dep-openrouter")
+
+    resp = await call_generation(harness, body={"model": "openrouter/minimax/hailuo-3", "prompt": "x"})
+
+    decoded = decode_video_id_with_provider(resp.id)
+    assert decoded == {"custom_llm_provider": "openrouter", "model_id": "dep-openrouter", "video_id": "gen-1"}
+
+
+@pytest.mark.asyncio
+async def test_generation__an_unencoded_id_is_returned_as_the_provider_sent_it(harness):
+    harness.base_process.return_value = _video("gen-raw", model_id="dep-openrouter")
+
+    resp = await call_generation(harness, body={"model": "sora-2", "prompt": "x"})
+
+    assert resp.id == "gen-raw"
+
+
+@pytest.mark.asyncio
+async def test_status__keeps_the_request_ids_deployment_when_the_adapter_drops_the_model(harness):
+    requested = encode_video_id_with_provider("gen-1", "openrouter", VIDEO_MODEL_ID)
+    harness.base_process.return_value = _video(encode_video_id_with_provider("gen-1", "openrouter", None))
+
+    resp = await call_status(harness, requested)
+
+    assert decode_video_id_with_provider(resp.id).get("model_id") == VIDEO_MODEL_ID
+
+
+@pytest.mark.asyncio
+async def test_status__prefers_the_deployment_that_answered(harness):
+    requested = encode_video_id_with_provider("gen-1", "openrouter", VIDEO_MODEL_ID)
+    harness.base_process.return_value = _video(
+        encode_video_id_with_provider("gen-1", "openrouter", "minimax/hailuo-3"), model_id="dep-openrouter"
+    )
+
+    resp = await call_status(harness, requested)
+
+    assert decode_video_id_with_provider(resp.id).get("model_id") == "dep-openrouter"
+
+
+def test_deployment_id_resolves_to_the_row_that_created_the_job():
+    router = Router(
+        model_list=[
+            {
+                "model_name": "minimax/hailuo-3",
+                "litellm_params": {"model": "minimax/MiniMax-H3", "api_key": "k"},
+                "model_info": {"id": "dep-minimax"},
+            },
+            {
+                "model_name": "openrouter/minimax/hailuo-3",
+                "litellm_params": {"model": "openrouter/minimax/hailuo-3", "api_key": "k"},
+                "model_info": {"id": "dep-openrouter"},
+            },
+        ]
+    )
+    adapter_id = encode_video_id_with_provider("gen-1", "openrouter", "minimax/hailuo-3")
+    # The adapter's model name alone resolves to the direct MiniMax row.
+    assert router.resolve_model_name_from_model_id("minimax/hailuo-3") == "minimax/hailuo-3"
+
+    returned = encode_video_id_in_response(_video(adapter_id, model_id="dep-openrouter"))
+
+    model_id = decode_video_id_with_provider(returned.id).get("model_id")
+    assert router.resolve_model_name_from_model_id(model_id) == "openrouter/minimax/hailuo-3"
