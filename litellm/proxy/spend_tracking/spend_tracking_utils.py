@@ -67,6 +67,7 @@ from litellm.proxy.utils import PrismaClient, hash_token
 from litellm.types.router import DeploymentTypedDict, LiteLLM_Params
 from litellm.types.utils import (
     BACKGROUND_RESPONSE_COST_POLL_CALL_ORIGIN,
+    BACKGROUND_VIDEO_COST_POLL_CALL_ORIGIN,
     PROMPT_CARRYING_GUARDRAIL_FIELDS,
     AzureSpillover,
     CallTypes,
@@ -302,6 +303,14 @@ def _get_spend_logs_metadata(
 
 BATCH_COST_REQUEST_ID_SUFFIX: Final = "_batch_cost"
 BACKGROUND_RESPONSE_COST_REQUEST_ID_SUFFIX: Final = "_background_cost"
+VIDEO_COST_REQUEST_ID_SUFFIX: Final = "_video_cost"
+
+
+def _is_background_video_cost_poll(kwargs: Mapping[str, object]) -> bool:
+    metadata: Final = get_litellm_metadata_from_kwargs(dict(kwargs))
+    if not isinstance(metadata, Mapping):
+        return False
+    return metadata.get(INTERNAL_CALL_ORIGIN_METADATA_KEY) == BACKGROUND_VIDEO_COST_POLL_CALL_ORIGIN
 
 
 def _cost_row_request_id_suffix(call_type: str, metadata: Mapping[str, object]) -> str:
@@ -329,6 +338,10 @@ def get_spend_logs_id(
     )
     if resolved_id is None:
         return None
+    # The create row already owns this video id. SpendLogs skips duplicate primary keys,
+    # so the finish row would be dropped and the cost would never appear.
+    if _is_background_video_cost_poll(kwargs):
+        return f"{resolved_id}{VIDEO_COST_REQUEST_ID_SUFFIX}"
     return f"{resolved_id}{_cost_row_request_id_suffix(call_type, metadata)}"
 
 
