@@ -1,12 +1,18 @@
 """MiniMax Hailuo video jobs on the OpenAI /videos routes.
 
 Callers: ProviderConfigManager.get_provider_video_config.
-MinimaxVideoConfig, minimax_completed_cost.
+MinimaxVideoConfig, MinimaxRates, minimax_rates, minimax_completed_cost.
+
+Rates come from the deployment's model_info, keyed by output resolution in
+lower case (480p, 768p, 2k). Create refuses a job whose rates are not set.
+Only generation tasks are priced: this adapter creates no other task type.
 """
 
+import math
 from collections.abc import Mapping
+from dataclasses import dataclass
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 from urllib.parse import urlparse
 
 import httpx
@@ -50,8 +56,12 @@ _OPTIONAL_PARAMS: Final = (
     "size",
     "content",
 )
-# Published pay-as-you-go rates from platform.minimax.io. Audio is free.
-_SECOND: Final = {"768P": Decimal("0.08"), "2K": Decimal("0.13")}
+# model_info keys. The two per-second keys end in the output resolution.
+# MiniMax prices input video by the output resolution, not the input's. Audio is free.
+OUTPUT_PER_SECOND_KEY: Final = "output_cost_per_second_{}"
+INPUT_VIDEO_PER_SECOND_KEY: Final = "input_cost_per_video_per_second_{}"
+PER_IMAGE_KEY: Final = "input_cost_per_image"
+FREE_IMAGES_KEY: Final = "free_input_image_count"
 _STATUS: Final = {
     "queued": "queued",
     "pending": "queued",
@@ -75,45 +85,70 @@ class MinimaxVideoError(BaseLLMException):
     pass
 
 
-def minimax_completed_cost(body: object) -> float | None:
-    """Dollars for a succeeded MiniMax-H3 task, or nothing if it is not billable."""
+@dataclass(frozen=True)
+class MinimaxRates:
+    """One output resolution's rates, in dollars."""
+
+    output_per_second: Decimal
+    input_video_per_second: Decimal
+    per_image: Decimal
+    free_images: int
+
+
+def _deployment_model_info(litellm_params: GenericLiteLLMParams) -> Mapping[str, object]:
+    """The deployment's model_info, or empty when the call has none."""
+    model_info: Final = cast("Mapping[str, object] | None", litellm_params.model_info)  # cast-ok: declared as a bare dict
+    return model_info if model_info is not None else {}
+
+
+def minimax_rates(model_info: Mapping[str, object], resolution: object) -> MinimaxRates:
+    """The deployment's rates for one output resolution. Raises when any is not set."""
+    if not isinstance(resolution, str) or not resolution.strip():
+        raise ValueError("MiniMax video needs a resolution to price the job.")
+    suffix: Final = resolution.strip().lower()
+    free: Final = model_info.get(FREE_IMAGES_KEY)
+    if isinstance(free, bool) or not isinstance(free, int) or free < 0:
+        raise ValueError(f"MiniMax video needs model_info.{FREE_IMAGES_KEY} (a whole number) on this deployment.")
+    return MinimaxRates(
+        output_per_second=_rate(model_info, OUTPUT_PER_SECOND_KEY.format(suffix)),
+        input_video_per_second=_rate(model_info, INPUT_VIDEO_PER_SECOND_KEY.format(suffix)),
+        per_image=_rate(model_info, PER_IMAGE_KEY),
+        free_images=free,
+    )
+
+
+def minimax_completed_cost(body: object, model_info: Mapping[str, object]) -> float | None:
+    """Dollars for a succeeded generation task at the deployment's rates, or nothing if it is not billable."""
     if not isinstance(body, dict):
         return None
     task = body.get("task")
-    if not isinstance(task, dict) or task.get("status") != "succeeded" or task.get("model") != "MiniMax-H3":
+    if not isinstance(task, dict) or task.get("status") != "succeeded":
+        return None
+    # Regeneration and Context-IR are separate MiniMax APIs this adapter never calls.
+    if task.get("task_type", "generation") != "generation":
         return None
     usage = task.get("usage")
     if not isinstance(usage, dict):
         return None
-    task_type = task.get("task_type", "generation")
-    if task_type == "h3_context_ir":
-        return _context_cost(usage)
-    if task_type == "regeneration":
-        return _second_cost(usage, Decimal("0.05"), Decimal("0.025"))
-    if task_type != "generation":
-        return None
-    per_second = _SECOND.get(task.get("resolution"))
-    if per_second is None:
-        return None
-    return _second_cost(usage, per_second, Decimal("0.04"))
-
-
-def _second_cost(usage: Mapping[str, Any], per_second: Decimal, extra_image: Decimal) -> float | None:
     output_seconds = _whole_number(usage.get("output_seconds"))
     input_seconds = _whole_number(usage.get("input_seconds"))
     images = _whole_number(usage.get("input_image_count"))
     if output_seconds is None or input_seconds is None or images is None:
         return None
-    # The first five images are free.
-    return _dollars((output_seconds + input_seconds) * per_second + max(0, images - 5) * extra_image)
+    # A finished job with no rate raises rather than being served unbilled.
+    rates: Final = minimax_rates(model_info, task.get("resolution"))
+    return _dollars(
+        output_seconds * rates.output_per_second
+        + input_seconds * rates.input_video_per_second
+        + max(0, images - rates.free_images) * rates.per_image
+    )
 
 
-def _context_cost(usage: Mapping[str, Any]) -> float | None:
-    prompt = _whole_number(usage.get("prompt_tokens"))
-    completion = _whole_number(usage.get("completion_tokens"))
-    if prompt is None or completion is None:
-        return None
-    return _dollars(prompt * Decimal("0.90") / Decimal(1_000_000) + completion * Decimal("3.60") / Decimal(1_000_000))
+def _rate(model_info: Mapping[str, object], key: str) -> Decimal:
+    value: Final = model_info.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        raise ValueError(f"MiniMax video needs model_info.{key} (dollars) on this deployment.")
+    return Decimal(str(value))
 
 
 def _whole_number(value: object) -> int | None:
@@ -152,6 +187,12 @@ def _https_url(value: object) -> str | None:
 
 
 class MinimaxVideoConfig(BaseVideoConfig):
+    def __init__(self) -> None:
+        super().__init__()
+        # The status response hook gets no litellm_params, so the status request
+        # keeps the deployment's model_info for pricing. One instance per call.
+        self._model_info: Mapping[str, object] = {}
+
     def get_supported_openai_params(self, model: str) -> list:
         return ["model", "prompt", *_OPTIONAL_PARAMS]
 
@@ -212,6 +253,8 @@ class MinimaxVideoConfig(BaseVideoConfig):
             body["ratio"] = ratio
         if "generate_audio" in params:
             body["generate_audio"] = params["generate_audio"]
+        # Refuse before MiniMax is called: a job with no rate would finish unbilled.
+        minimax_rates(_deployment_model_info(litellm_params), body.get("resolution"))
         return body, [], f"{_api_root(api_base)}{_CREATE_PATH}"
 
     def transform_video_create_response(
@@ -240,6 +283,7 @@ class MinimaxVideoConfig(BaseVideoConfig):
         litellm_params: GenericLiteLLMParams,
         headers: dict,
     ) -> tuple[str, dict]:
+        self._model_info = _deployment_model_info(litellm_params)
         task_id: Final = encode_url_path_segment(extract_original_video_id(video_id), field_name="video_id")
         return f"{_api_root(api_base)}{_QUERY_PATH}/{task_id}", {}
 
@@ -258,7 +302,7 @@ class MinimaxVideoConfig(BaseVideoConfig):
             raise MinimaxVideoError(status_code=raw_response.status_code, message="MiniMax video status did not include a task id", headers=raw_response.headers)
         model = task.get("model") if isinstance(task.get("model"), str) else None
         video = _video_object(job_id, _map_status(task.get("status")), model)
-        cost = minimax_completed_cost(payload)
+        cost = minimax_completed_cost(payload, self._model_info)
         if cost is not None:
             video.usage = {"provider_reported_cost_usd": cost}
         if custom_llm_provider:
