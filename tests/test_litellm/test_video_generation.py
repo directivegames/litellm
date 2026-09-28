@@ -510,6 +510,38 @@ class TestVideoGeneration:
         )
         assert cost == 6.4
 
+    def test_completion_cost_video_reported_cost_wins_over_adapter_rate_keys(self):
+        """The MiniMax and BytePlus rate keys feed the adapter, not a repricing by duration."""
+        from litellm.cost_calculator import completion_cost
+
+        mock_response = MagicMock()
+        mock_response.usage = {"provider_reported_cost_usd": 0.4}
+        type(mock_response)._hidden_params = {}
+
+        mock_logging_obj = MagicMock()
+        mock_logging_obj.litellm_params = {
+            "metadata": {
+                "model_info": {
+                    "mode": "video_generation",
+                    "output_cost_per_second_768p": 0.08,
+                    "input_cost_per_video_per_second_768p": 0.08,
+                    "input_cost_per_image": 0.04,
+                    "free_input_image_count": 5,
+                    "output_cost_per_video_token_without_video_input_720p": 0.0000107,
+                }
+            }
+        }
+
+        cost = completion_cost(
+            completion_response=mock_response,
+            model="MiniMax-H3",
+            call_type="video_retrieve",
+            custom_llm_provider="minimax",
+            custom_pricing=True,
+            litellm_logging_obj=mock_logging_obj,
+        )
+        assert cost == 0.4
+
     def test_video_generation_with_files(self):
         """Test video generation with file uploads."""
         config = OpenAIVideoConfig()
