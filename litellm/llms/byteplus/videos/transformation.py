@@ -1,15 +1,20 @@
 """BytePlus ModelArk Seedance video jobs on the OpenAI /videos routes.
 
 Callers: ProviderConfigManager.get_provider_video_config.
-BytePlusVideoConfig, seedance_completed_cost, attach_rate_class, split_rate_class.
+BytePlusVideoConfig, RATE_KEYS, seedance_rate, seedance_completed_cost,
+attach_rate_class, split_rate_class.
 
 The finished task reports tokens, not whether the create body included video.
 That class is suffixed onto the task id before it is encoded, then stripped
-on the way back to BytePlus. The two published rates are $10.7 and $6.4 per million tokens.
+on the way back to BytePlus. The per-token rate depends on that class and on
+the output resolution, and comes from the deployment's model_info (RATE_KEYS).
+Create refuses a job whose rate is not set.
 """
 
+import math
+from collections.abc import Mapping
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 from urllib.parse import urlparse
 
 import httpx
@@ -42,7 +47,6 @@ else:
 # International ModelArk. Volcengine's China host is a different provider.
 _DEFAULT_API_BASE: Final = "https://ark.ap-southeast.bytepluses.com"
 _TASKS_PATH: Final = "/api/v3/contents/generations/tasks"
-_MODEL: Final = "dreamina-seedance-2-5-260628"
 _OPTIONAL_PARAMS: Final = (
     "duration",
     "seconds",
@@ -53,7 +57,13 @@ _OPTIONAL_PARAMS: Final = (
     "size",
     "content",
 )
-_PER_MILLION: Final = {"plain": Decimal("10.7"), "video": Decimal("6.4")}
+# Dollars per token on the deployment's model_info. BytePlus bills the whole
+# task at one rate, chosen by whether the create input had a video and by the
+# output resolution. Keys end in the resolution in lower case (480p, 720p, 1080p).
+RATE_KEYS: Final = {
+    "plain": "output_cost_per_video_token_without_video_input_{}",
+    "video": "output_cost_per_video_token_with_video_input_{}",
+}
 _STATUS: Final = {
     "queued": "queued",
     "pending": "queued",
@@ -79,7 +89,7 @@ class BytePlusVideoError(BaseLLMException):
 
 def attach_rate_class(task_id: str, kind: str) -> str:
     """Hide the input class in the id the caller polls. BytePlus never sees this suffix."""
-    if kind not in _PER_MILLION:
+    if kind not in RATE_KEYS:
         return task_id
     return f"{task_id}~{kind}"
 
@@ -87,7 +97,7 @@ def attach_rate_class(task_id: str, kind: str) -> str:
 def split_rate_class(stored_id: str) -> tuple[str, str | None]:
     """Task id for the provider, and plain or video when the suffix is one of those."""
     task_id, separator, kind = stored_id.rpartition("~")
-    if separator == "" or kind not in _PER_MILLION or not task_id:
+    if separator == "" or kind not in RATE_KEYS or not task_id:
         return stored_id, None
     return task_id, kind
 
@@ -102,11 +112,27 @@ def seedance_input_kind(body: object) -> str | None:
     return "plain"
 
 
-def seedance_completed_cost(body: object, kind: str | None) -> float | None:
-    """Dollars for a succeeded Seedance task at the rate for that input class."""
-    if kind not in _PER_MILLION or not isinstance(body, dict) or body.get("status") != "succeeded":
-        return None
-    if body.get("model") != _MODEL:
+def _deployment_model_info(litellm_params: GenericLiteLLMParams) -> Mapping[str, object]:
+    """The deployment's model_info, or empty when the call has none."""
+    model_info: Final = cast("Mapping[str, object] | None", litellm_params.model_info)  # cast-ok: declared as a bare dict
+    return model_info if model_info is not None else {}
+
+
+def seedance_rate(model_info: Mapping[str, object], kind: str, resolution: object) -> Decimal:
+    """Dollars per token for this input class and resolution. Raises when the deployment does not set it."""
+    if not isinstance(resolution, str) or not resolution.strip():
+        raise ValueError("BytePlus video needs a resolution to price the job.")
+    key: Final = RATE_KEYS[kind].format(resolution.strip().lower())
+    value: Final = model_info.get(key)
+    # bool is an int subclass; true/false is not a price.
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        raise ValueError(f"BytePlus video needs model_info.{key} (dollars per token) on this deployment.")
+    return Decimal(str(value))
+
+
+def seedance_completed_cost(body: object, kind: str | None, model_info: Mapping[str, object]) -> float | None:
+    """Dollars for a succeeded Seedance task at the deployment's rate for its input class and resolution."""
+    if kind not in RATE_KEYS or not isinstance(body, dict) or body.get("status") != "succeeded":
         return None
     usage = body.get("usage")
     if not isinstance(usage, dict):
@@ -114,8 +140,8 @@ def seedance_completed_cost(body: object, kind: str | None) -> float | None:
     tokens = usage.get("total_tokens")
     if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens <= 0:
         return None
-    rate = _PER_MILLION[kind]
-    cost = Decimal(tokens) * rate / Decimal(1_000_000)
+    # A finished job with no rate raises rather than being served unbilled.
+    cost = Decimal(tokens) * seedance_rate(model_info, kind, body.get("resolution"))
     if cost <= 0:
         return None
     return float(cost)
@@ -158,6 +184,12 @@ def _requested_video_id(logging_obj: object) -> str:
 
 
 class BytePlusVideoConfig(BaseVideoConfig):
+    def __init__(self) -> None:
+        super().__init__()
+        # The status response hook gets no litellm_params, so the status request
+        # keeps the deployment's model_info for pricing. One instance per call.
+        self._model_info: Mapping[str, object] = {}
+
     def get_supported_openai_params(self, model: str) -> list:
         return ["model", "prompt", *_OPTIONAL_PARAMS]
 
@@ -218,6 +250,8 @@ class BytePlusVideoConfig(BaseVideoConfig):
             body["ratio"] = ratio
         if "generate_audio" in params:
             body["generate_audio"] = params["generate_audio"]
+        # Refuse before BytePlus is called: a job with no rate would finish unbilled.
+        seedance_rate(_deployment_model_info(litellm_params), seedance_input_kind(body) or "plain", body.get("resolution"))
         return body, [], f"{_api_root(api_base)}{_TASKS_PATH}"
 
     def transform_video_create_response(
@@ -251,6 +285,7 @@ class BytePlusVideoConfig(BaseVideoConfig):
         litellm_params: GenericLiteLLMParams,
         headers: dict,
     ) -> tuple[str, dict]:
+        self._model_info = _deployment_model_info(litellm_params)
         task_id, _kind = split_rate_class(extract_original_video_id(video_id))
         encoded: Final = encode_url_path_segment(task_id, field_name="video_id")
         return f"{_api_root(api_base)}{_TASKS_PATH}/{encoded}", {}
@@ -281,7 +316,7 @@ class BytePlusVideoConfig(BaseVideoConfig):
         video = VideoObject(id=stored_id, object="video", status=_map_status(payload.get("status")), created_at=0)
         if model is not None:
             video.model = model
-        cost = seedance_completed_cost(payload, kind)
+        cost = seedance_completed_cost(payload, kind, self._model_info)
         if cost is not None:
             video.usage = {"provider_reported_cost_usd": cost}
         if custom_llm_provider:
