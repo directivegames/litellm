@@ -274,6 +274,7 @@ from litellm.constants import (
     PROXY_BUDGET_RESCHEDULER_MAX_TIME,
     PROXY_BUDGET_RESCHEDULER_MIN_TIME,
     PROXY_CONFIG_RELOAD_INTERVAL_SECONDS,
+    PROXY_VIDEO_COST_POLLING_INTERVAL,
     ROUTER_SETTINGS_MANAGED_OUTSIDE_CONFIG,
     USER_SPEND_ALERTS_JOB_ID,
     WEEKLY_SPEND_REPORT_JOB_ID,
@@ -10106,6 +10107,24 @@ class ProxyStartupEvent:
                 verbose_proxy_logger.debug(
                     "Checking responses cost for LiteLLM Managed Files is an Enterprise Feature. Skipping..."
                 )
+
+        ### CHECK VIDEO COST ###
+        # Not gated on PROXY_BATCH_POLLING_ENABLED: video jobs that bill on finish are
+        # billed only here, so turning the batch pollers off must not stop that billing.
+        if llm_router is not None:
+            from litellm.proxy.video_endpoints.check_video_cost import CheckVideoCost
+
+            check_video_cost_job: Final = CheckVideoCost(
+                prisma_client=prisma_client, llm_router=llm_router, alerts=proxy_logging_obj
+            )
+            scheduler.add_job(  # pyright: ignore[reportUnknownMemberType]  # APScheduler ships no type hints
+                check_video_cost_job.check_video_cost,
+                "interval",
+                seconds=PROXY_VIDEO_COST_POLLING_INTERVAL + random.randint(0, 10),
+                id="check_video_cost_job",
+                replace_existing=True,
+                misfire_grace_time=APSCHEDULER_MISFIRE_GRACE_TIME,
+            )
 
         # MEMORY LEAK FIX: Start scheduler with paused=False to avoid backlog processing
         # Do NOT reset job times to "now" as this can trigger the memory leak

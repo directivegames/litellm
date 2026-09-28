@@ -6,6 +6,10 @@ MinimaxVideoConfig, MinimaxRates, minimax_rates, minimax_completed_cost.
 Rates come from the deployment's model_info, keyed by output resolution in
 lower case (480p, 768p, 2k). Create refuses a job whose rates are not set.
 Only generation tasks are priced: this adapter creates no other task type.
+
+Create does not bill. It hands the task id to the proxy's video cost poller
+(VIDEO_COST_POLL_ID_KEY), which bills the job once it succeeds, from the
+seconds and image count MiniMax reports. A job that fails is not charged.
 """
 
 import math
@@ -31,6 +35,7 @@ from litellm.secret_managers.main import get_secret_str
 from litellm.types.router import GenericLiteLLMParams
 from litellm.types.videos.main import VideoCreateOptionalRequestParams, VideoObject
 from litellm.types.videos.utils import (
+    VIDEO_COST_POLL_ID_KEY,
     encode_video_id_with_provider,
     extract_original_video_id,
 )
@@ -97,7 +102,9 @@ class MinimaxRates:
 
 def _deployment_model_info(litellm_params: GenericLiteLLMParams) -> Mapping[str, object]:
     """The deployment's model_info, or empty when the call has none."""
-    model_info: Final = cast("Mapping[str, object] | None", litellm_params.model_info)  # cast-ok: declared as a bare dict
+    model_info: Final = cast(  # cast-ok: declared as a bare dict
+        "Mapping[str, object] | None", litellm_params.model_info
+    )
     return model_info if model_info is not None else {}
 
 
@@ -152,10 +159,13 @@ def _rate(model_info: Mapping[str, object], key: str) -> Decimal:
 
 
 def _whole_number(value: object) -> int | None:
-    # bool is an int subclass; a true/false count is not usage.
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    # bool is an int subclass; a true/false count is not usage. A JSON count may arrive as 5.0,
+    # and refusing it would leave a finished job unbilled. is_integer() is False for nan and inf.
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
         return None
-    return value
+    if isinstance(value, float) and not value.is_integer():
+        return None
+    return int(value)
 
 
 def _dollars(cost: Decimal) -> float | None:
@@ -267,13 +277,22 @@ class MinimaxVideoConfig(BaseVideoConfig):
     ) -> VideoObject:
         payload: Final = raw_response.json()
         if not isinstance(payload, dict):
-            raise MinimaxVideoError(status_code=raw_response.status_code, message="MiniMax video response was not an object", headers=raw_response.headers)
+            raise MinimaxVideoError(
+                status_code=raw_response.status_code,
+                message="MiniMax video response was not an object",
+                headers=raw_response.headers,
+            )
         job_id = payload.get("task_id") or payload.get("id")
         if not isinstance(job_id, str) or not job_id:
-            raise MinimaxVideoError(status_code=raw_response.status_code, message="MiniMax video response did not include a task id", headers=raw_response.headers)
+            raise MinimaxVideoError(
+                status_code=raw_response.status_code,
+                message="MiniMax video response did not include a task id",
+                headers=raw_response.headers,
+            )
         video = _video_object(job_id, _map_status(payload.get("status", "queued")), model)
         if custom_llm_provider:
             video.id = encode_video_id_with_provider(job_id, custom_llm_provider, model)
+        video._hidden_params[VIDEO_COST_POLL_ID_KEY] = job_id  # pyright: ignore[reportPrivateUsage]  # the proxy reads adapter facts here
         return video
 
     def transform_video_status_retrieve_request(
@@ -296,10 +315,18 @@ class MinimaxVideoConfig(BaseVideoConfig):
         payload: Final = raw_response.json()
         task = payload.get("task") if isinstance(payload, dict) else None
         if not isinstance(task, dict):
-            raise MinimaxVideoError(status_code=raw_response.status_code, message="MiniMax video status did not include a task", headers=raw_response.headers)
+            raise MinimaxVideoError(
+                status_code=raw_response.status_code,
+                message="MiniMax video status did not include a task",
+                headers=raw_response.headers,
+            )
         job_id = task.get("id")
         if not isinstance(job_id, str) or not job_id:
-            raise MinimaxVideoError(status_code=raw_response.status_code, message="MiniMax video status did not include a task id", headers=raw_response.headers)
+            raise MinimaxVideoError(
+                status_code=raw_response.status_code,
+                message="MiniMax video status did not include a task id",
+                headers=raw_response.headers,
+            )
         model = task.get("model") if isinstance(task.get("model"), str) else None
         video = _video_object(job_id, _map_status(task.get("status")), model)
         cost = minimax_completed_cost(payload, self._model_info)
@@ -347,7 +374,9 @@ class MinimaxVideoConfig(BaseVideoConfig):
     def transform_video_remix_response(self, raw_response, logging_obj, custom_llm_provider=None):
         raise NotImplementedError("Video remix is not supported for MiniMax")
 
-    def transform_video_list_request(self, api_base, litellm_params, headers, after=None, limit=None, order=None, extra_query=None):
+    def transform_video_list_request(
+        self, api_base, litellm_params, headers, after=None, limit=None, order=None, extra_query=None
+    ):
         raise NotImplementedError("Video listing is not supported for MiniMax")
 
     def transform_video_list_response(self, raw_response, logging_obj, custom_llm_provider=None):

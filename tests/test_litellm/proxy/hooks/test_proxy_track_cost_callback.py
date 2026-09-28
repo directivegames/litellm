@@ -1939,6 +1939,21 @@ def test_should_track_cost_callback_pass_through_without_owner(call_type, expect
     )
 
 
+def test_should_track_a_video_cost_poll_without_owner():
+    """A finished video job the video cost poller bills is real provider spend, like a batch."""
+    assert (
+        _should_track_cost_callback(
+            user_api_key=None,
+            user_id=None,
+            team_id=None,
+            end_user_id=None,
+            call_type=CallTypes.avideo_retrieve.value,
+            background_cost_poll=True,
+        )
+        is True
+    )
+
+
 @pytest.mark.parametrize(
     "call_type, expect_spend_log",
     [

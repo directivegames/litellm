@@ -23,7 +23,15 @@ from typing import Final
 
 from litellm.constants import INTERNAL_CALL_ORIGIN_METADATA_KEY, NON_INFERENCE_CALL_TYPES
 from litellm.litellm_core_utils.initialize_dynamic_callback_params import initialize_standard_callback_dynamic_params
-from litellm.types.utils import BACKGROUND_RESPONSE_COST_POLL_CALL_ORIGIN, InternalCallOrigin
+from litellm.types.utils import (
+    BACKGROUND_RESPONSE_COST_POLL_CALL_ORIGIN,
+    BACKGROUND_VIDEO_COST_POLL_CALL_ORIGIN,
+    InternalCallOrigin,
+)
+
+_BILLED_READ_ORIGINS: Final = frozenset(
+    {BACKGROUND_RESPONSE_COST_POLL_CALL_ORIGIN, BACKGROUND_VIDEO_COST_POLL_CALL_ORIGIN}
+)
 
 BUDGET_RESERVATION_METADATA_KEYS: Final = frozenset({"user_api_key_budget_reservation"})
 
@@ -77,7 +85,8 @@ def is_unbilled_non_inference_call(
     Retrieving a background response is the exception, and the enterprise cost poller's read
     is the same exception seen from the other side: that job's create billed nothing, so its
     retrieval is the only place the spend is ever visible. Pricing those at zero would lose
-    the spend rather than deduplicate it.
+    the spend rather than deduplicate it. The proxy's video cost poller bills a finished
+    video job the same way.
     """
     if call_type not in NON_INFERENCE_CALL_TYPES:
         return False
@@ -85,7 +94,7 @@ def is_unbilled_non_inference_call(
         return False
     if metadata is None:
         return True
-    return metadata.get(INTERNAL_CALL_ORIGIN_METADATA_KEY) != BACKGROUND_RESPONSE_COST_POLL_CALL_ORIGIN
+    return metadata.get(INTERNAL_CALL_ORIGIN_METADATA_KEY) not in _BILLED_READ_ORIGINS
 
 
 def is_unbilled_non_inference_call_from_params(

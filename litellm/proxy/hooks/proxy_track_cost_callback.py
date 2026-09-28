@@ -1,13 +1,13 @@
 import asyncio
 import traceback
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Final, cast
 
 import litellm
 from litellm._logging import verbose_proxy_logger
 from litellm.batches.batch_utils import batch_cost_is_final
-from litellm.constants import BACKGROUND_INTERACTION_COST_POLLING_ENABLED
+from litellm.constants import BACKGROUND_INTERACTION_COST_POLLING_ENABLED, INTERNAL_CALL_ORIGIN_METADATA_KEY
 from litellm.integrations.custom_logger import CustomLogger
 from litellm.litellm_core_utils.core_helpers import (
     _get_parent_otel_span_from_kwargs,
@@ -49,6 +49,7 @@ from litellm.proxy.spend_tracking.spend_tracking_utils import (
 )
 from litellm.proxy.utils import ProxyUpdateSpend
 from litellm.types.utils import (
+    BACKGROUND_VIDEO_COST_POLL_CALL_ORIGIN,
     CallTypes,
     LiteLLMBatch,
     StandardLoggingPayload,
@@ -80,6 +81,10 @@ _CAPTURED_IDENTITY_CALL_TYPES: Final[frozenset[str]] = frozenset(
         str(CallTypes.aretrieve_batch),
     )
 )
+
+
+def _is_video_cost_poll(metadata: Mapping[str, object]) -> bool:
+    return metadata.get(INTERNAL_CALL_ORIGIN_METADATA_KEY) == BACKGROUND_VIDEO_COST_POLL_CALL_ORIGIN
 
 
 def _proxy_spend_writer() -> DBSpendUpdateWriter:
@@ -293,12 +298,17 @@ class _ProxyDBLogger(CustomLogger):
             litellm_params: Final = kwargs.get("litellm_params", {}) or {}
             end_user_id: Final = get_end_user_id_for_cost_tracking(litellm_params)
             metadata = get_litellm_metadata_from_kwargs(kwargs=kwargs)
+            # The video cost poller logs a finished job long after its create, with the
+            # identity recorded at create, like CheckBatchCost.
+            video_cost_poll: Final = _is_video_cost_poll(metadata)  # pyright: ignore[reportUnknownArgumentType]  # metadata is a bare dict upstream
             # Only fetch key details when user_id wasn't already populated (e.g. direct MCP REST calls).
             # Avoids a cache/DB lookup on every normal LLM request.
             if metadata.get("user_api_key") and not metadata.get("user_api_key_user_id"):
                 metadata = await _ProxyDBLogger._enrich_failure_metadata_with_key_info(  # rebind-ok: enriched metadata replaces the original
                     metadata=metadata,
-                    resolve_missing_key_identity=str(kwargs.get("call_type")) not in _CAPTURED_IDENTITY_CALL_TYPES,
+                    resolve_missing_key_identity=(
+                        str(kwargs.get("call_type")) not in _CAPTURED_IDENTITY_CALL_TYPES and not video_cost_poll
+                    ),
                 )
                 _write_spend_metadata_to_kwargs(kwargs=kwargs, metadata=metadata)
             budget_reservation: Final = _get_budget_reservation_from_metadata(metadata=metadata)
@@ -349,6 +359,7 @@ class _ProxyDBLogger(CustomLogger):
                     team_id=team_id,
                     end_user_id=end_user_id,
                     call_type=call_type,
+                    background_cost_poll=video_cost_poll,
                 ):
                     ## UPDATE DATABASE
                     charged: Final = await _update_database_and_spend_counters(
@@ -583,6 +594,7 @@ def _should_track_cost_callback(
     team_id: str | None,
     end_user_id: str | None,
     call_type: str | None = None,
+    background_cost_poll: bool = False,
 ) -> bool:
     """
     Determine if the cost callback should be tracked based on the kwargs
@@ -592,7 +604,8 @@ def _should_track_cost_callback(
     requests still forward real provider traffic that operators expect to see
     in request/usage logs, so they are tracked even when unauthenticated.
     The same reasoning applies to a completed managed batch's cost event
-    (see _UNATTRIBUTED_TRACKABLE_CALL_TYPES).
+    (see _UNATTRIBUTED_TRACKABLE_CALL_TYPES), and to a finished video job the
+    video cost poller bills (background_cost_poll).
     """
 
     # don't run track cost callback if user opted into disabling spend
@@ -601,7 +614,7 @@ def _should_track_cost_callback(
 
     if user_api_key is not None or user_id is not None or team_id is not None or end_user_id is not None:
         return True
-    return call_type in _UNATTRIBUTED_TRACKABLE_CALL_TYPES
+    return background_cost_poll or call_type in _UNATTRIBUTED_TRACKABLE_CALL_TYPES
 
 
 def _get_budget_reservation_from_metadata(metadata: dict) -> dict | None:

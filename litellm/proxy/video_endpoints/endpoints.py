@@ -16,6 +16,7 @@ from litellm.proxy.common_utils.openai_endpoint_utils import (
     get_custom_llm_provider_from_request_query,
 )
 from litellm.proxy.image_endpoints.endpoints import batch_to_bytesio
+from litellm.proxy.video_endpoints.check_video_cost import record_pending_video_job
 from litellm.proxy.video_endpoints.utils import (
     encode_character_id_in_response,
     encode_video_id_in_response,
@@ -69,6 +70,7 @@ async def video_generation(
     from litellm.proxy.proxy_server import (
         general_settings,
         llm_router,
+        prisma_client,
         proxy_config,
         proxy_logging_obj,
         select_data_generator,
@@ -108,7 +110,15 @@ async def video_generation(
             user_api_base=user_api_base,
             version=version,
         )
-        return encode_video_id_in_response(response)
+        encoded_response: Final[object] = encode_video_id_in_response(response)
+        await record_pending_video_job(
+            encoded_response,
+            user_api_key_dict,
+            processor.data,  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]  # data is a bare dict upstream
+            prisma_client,
+            proxy_logging_obj,
+        )
+        return encoded_response
     except Exception as e:
         raise await processor._handle_llm_api_exception(
             e=e,

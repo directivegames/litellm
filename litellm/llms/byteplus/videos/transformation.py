@@ -5,10 +5,14 @@ BytePlusVideoConfig, RATE_KEYS, seedance_rate, seedance_completed_cost,
 attach_rate_class, split_rate_class.
 
 The finished task reports tokens, not whether the create body included video.
-That class is suffixed onto the task id before it is encoded, then stripped
-on the way back to BytePlus. The per-token rate depends on that class and on
-the output resolution, and comes from the deployment's model_info (RATE_KEYS).
-Create refuses a job whose rate is not set.
+The per-token rate depends on that class and on the output resolution, and
+comes from the deployment's model_info (RATE_KEYS). Create refuses a job whose
+rate is not set.
+
+Create does not bill. The class is suffixed onto the task id handed to the
+proxy's video cost poller (VIDEO_COST_POLL_ID_KEY), and stripped on the way
+back to BytePlus. The caller's video id carries no class: a caller could edit
+it, so a status check the caller makes is never what bills the job.
 """
 
 import math
@@ -33,6 +37,7 @@ from litellm.secret_managers.main import get_secret_str
 from litellm.types.router import GenericLiteLLMParams
 from litellm.types.videos.main import VideoCreateOptionalRequestParams, VideoObject
 from litellm.types.videos.utils import (
+    VIDEO_COST_POLL_ID_KEY,
     encode_video_id_with_provider,
     extract_original_video_id,
 )
@@ -88,7 +93,7 @@ class BytePlusVideoError(BaseLLMException):
 
 
 def attach_rate_class(task_id: str, kind: str) -> str:
-    """Hide the input class in the id the caller polls. BytePlus never sees this suffix."""
+    """Add the input class to the id the cost poller checks. BytePlus never sees this suffix."""
     if kind not in RATE_KEYS:
         return task_id
     return f"{task_id}~{kind}"
@@ -114,7 +119,9 @@ def seedance_input_kind(body: object) -> str | None:
 
 def _deployment_model_info(litellm_params: GenericLiteLLMParams) -> Mapping[str, object]:
     """The deployment's model_info, or empty when the call has none."""
-    model_info: Final = cast("Mapping[str, object] | None", litellm_params.model_info)  # cast-ok: declared as a bare dict
+    model_info: Final = cast(  # cast-ok: declared as a bare dict
+        "Mapping[str, object] | None", litellm_params.model_info
+    )
     return model_info if model_info is not None else {}
 
 
@@ -137,14 +144,24 @@ def seedance_completed_cost(body: object, kind: str | None, model_info: Mapping[
     usage = body.get("usage")
     if not isinstance(usage, dict):
         return None
-    tokens = usage.get("total_tokens")
-    if isinstance(tokens, bool) or not isinstance(tokens, int) or tokens <= 0:
+    tokens: Final = _whole_number(usage.get("total_tokens"))
+    if tokens is None or tokens == 0:
         return None
     # A finished job with no rate raises rather than being served unbilled.
     cost = Decimal(tokens) * seedance_rate(model_info, kind, body.get("resolution"))
     if cost <= 0:
         return None
     return float(cost)
+
+
+def _whole_number(value: object) -> int | None:
+    # bool is an int subclass; a true/false count is not usage. A JSON count may arrive as 5.0,
+    # and refusing it would leave a finished job unbilled. is_integer() is False for nan and inf.
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        return None
+    if isinstance(value, float) and not value.is_integer():
+        return None
+    return int(value)
 
 
 def _is_video_item(item: dict[str, Any]) -> bool:
@@ -251,7 +268,9 @@ class BytePlusVideoConfig(BaseVideoConfig):
         if "generate_audio" in params:
             body["generate_audio"] = params["generate_audio"]
         # Refuse before BytePlus is called: a job with no rate would finish unbilled.
-        seedance_rate(_deployment_model_info(litellm_params), seedance_input_kind(body) or "plain", body.get("resolution"))
+        seedance_rate(
+            _deployment_model_info(litellm_params), seedance_input_kind(body) or "plain", body.get("resolution")
+        )
         return body, [], f"{_api_root(api_base)}{_TASKS_PATH}"
 
     def transform_video_create_response(
@@ -270,12 +289,15 @@ class BytePlusVideoConfig(BaseVideoConfig):
                 message="BytePlus video response did not include a task id",
                 headers=raw_response.headers,
             )
-        kind = seedance_input_kind(request_data)
-        stored_id = attach_rate_class(job_id, kind) if kind is not None else job_id
-        video = VideoObject(id=stored_id, object="video", status=_map_status(payload.get("status", "queued")), created_at=0)
+        video = VideoObject(
+            id=job_id, object="video", status=_map_status(payload.get("status", "queued")), created_at=0
+        )
         video.model = model
         if custom_llm_provider:
-            video.id = encode_video_id_with_provider(stored_id, custom_llm_provider, model)
+            video.id = encode_video_id_with_provider(job_id, custom_llm_provider, model)
+        # Matches the class create priced the gate with.
+        kind: Final = seedance_input_kind(request_data) or "plain"
+        video._hidden_params[VIDEO_COST_POLL_ID_KEY] = attach_rate_class(job_id, kind)  # pyright: ignore[reportPrivateUsage]  # the proxy reads adapter facts here
         return video
 
     def transform_video_status_retrieve_request(
@@ -360,7 +382,9 @@ class BytePlusVideoConfig(BaseVideoConfig):
     def transform_video_remix_response(self, raw_response, logging_obj, custom_llm_provider=None):
         raise NotImplementedError("Video remix is not supported for BytePlus")
 
-    def transform_video_list_request(self, api_base, litellm_params, headers, after=None, limit=None, order=None, extra_query=None):
+    def transform_video_list_request(
+        self, api_base, litellm_params, headers, after=None, limit=None, order=None, extra_query=None
+    ):
         raise NotImplementedError("Video listing is not supported for BytePlus")
 
     def transform_video_list_response(self, raw_response, logging_obj, custom_llm_provider=None):
