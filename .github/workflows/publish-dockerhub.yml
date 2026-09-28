@@ -1,5 +1,7 @@
 # Publish the primary proxy image to Docker Hub as directivegames/litellm.
-# Dispatch "Publish Docker Hub". It reads image_tag and git_ref.
+# Dispatch "Publish Docker Hub". The image tag is <project.version>-<counter>.
+# The counter is the next number for that version already on Docker Hub.
+# A new project.version starts again at 1. git_ref selects the commit to build.
 # Secrets on directivegames/litellm: DOCKERHUB_USERNAME, DOCKERHUB_TOKEN.
 
 name: Publish Docker Hub
@@ -7,10 +9,6 @@ name: Publish Docker Hub
 on:
   workflow_dispatch:
     inputs:
-      image_tag:
-        description: Tag to push (for example v1.102.0)
-        required: true
-        type: string
       git_ref:
         description: Git ref to build. Empty uses the branch this workflow runs on.
         required: false
@@ -26,7 +24,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: publish-dockerhub-${{ github.event.inputs.image_tag }}
+  group: publish-dockerhub
   cancel-in-progress: false
 
 env:
@@ -67,17 +65,16 @@ jobs:
         id: meta
         shell: bash
         env:
-          IMAGE_TAG: ${{ github.event.inputs.image_tag }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
           set -euo pipefail
-          if [[ ! "${IMAGE_TAG}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
-            echo "::error::image_tag is not a valid Docker tag"
-            exit 1
-          fi
+          image_tag="$(python .github/scripts/next_dockerhub_tag.py)"
           sha="$(git rev-parse --short HEAD)"
-          tags="${IMAGE}:${IMAGE_TAG},${IMAGE}:${sha}"
+          tags="${IMAGE}:${image_tag},${IMAGE}:${sha}"
           {
             echo "tags=${tags}"
+            echo "image_tag=${image_tag}"
             echo "sha=${sha}"
           } >> "$GITHUB_OUTPUT"
           echo "Will publish: ${tags}"
@@ -100,6 +97,7 @@ jobs:
           {
             echo "### ${IMAGE}"
             echo ""
+            echo "- image tag: \`${{ steps.meta.outputs.image_tag }}\`"
             echo "- tags: \`${{ steps.meta.outputs.tags }}\`"
             echo "- sha: \`${{ steps.meta.outputs.sha }}\`"
             echo "- dry_run: \`${{ github.event.inputs.dry_run }}\`"
