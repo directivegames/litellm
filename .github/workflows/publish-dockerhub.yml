@@ -1,5 +1,5 @@
 # Publish the primary proxy image to Docker Hub as directivegames/litellm.
-# Dispatch "Publish Docker Hub". The image tag is <project.version>-<counter>.
+# Dispatch "Publish Docker Hub". The image tag is <project.version>-dg.<counter>.
 # The counter is the next number for that version already on Docker Hub.
 # A new project.version starts again at 1. git_ref selects the commit to build.
 # Secrets on directivegames/litellm: DOCKERHUB_USERNAME, DOCKERHUB_TOKEN.

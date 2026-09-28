@@ -1,4 +1,4 @@
-"""Next Docker Hub tag for a fork publish: <upstream version>-<counter>.
+"""Next Docker Hub tag for a fork publish: <upstream version>-dg.<counter>.
 
 The counter is one higher than the highest tag already on Docker Hub for this
 project version. A new version starts at 1.
@@ -28,14 +28,14 @@ def project_version(path: Path) -> str:
 
 
 def next_tag(version: str, existing: list[str]) -> str:
-    """Return version-N. N is 1 when no version-N tag exists yet."""
-    pattern = re.compile(rf"^{re.escape(version)}-([0-9]+)$")
+    """Return version-dg.N. N is 1 when no version-dg.N tag exists yet."""
+    pattern = re.compile(rf"^{re.escape(version)}-dg\.([0-9]+)$")
     highest = 0
     for name in existing:
         match = pattern.fullmatch(name)
         if match is not None:
             highest = max(highest, int(match.group(1)))
-    tag = f"{version}-{highest + 1}"
+    tag = f"{version}-dg.{highest + 1}"
     if _TAG_PATTERN.fullmatch(tag) is None:
         raise SystemExit(f"{tag} is not a valid Docker tag")
     return tag
