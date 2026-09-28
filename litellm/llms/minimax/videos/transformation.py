@@ -174,6 +174,34 @@ def _dollars(cost: Decimal) -> float | None:
     return float(cost)
 
 
+def _minimax_billed_usage(body: object, model_info: Mapping[str, object], cost: float) -> dict[str, object]:
+    """The price and the seconds, images, and rates that produced it."""
+    task = body.get("task") if isinstance(body, dict) else None
+    usage = task.get("usage") if isinstance(task, dict) else None
+    if not isinstance(task, dict) or not isinstance(usage, dict):
+        return {"provider_reported_cost_usd": cost}
+    rates: Final = minimax_rates(model_info, task.get("resolution"))
+    resolution: Final = task.get("resolution")
+    output_seconds: Final = _whole_number(usage.get("output_seconds"))
+    return {
+        "provider_reported_cost_usd": cost,
+        "duration_seconds": output_seconds,
+        "input_seconds": _whole_number(usage.get("input_seconds")),
+        "input_image_count": _whole_number(usage.get("input_image_count")),
+        "video_resolution": resolution.strip().lower() if isinstance(resolution, str) else None,
+        "output_cost_per_second": float(rates.output_per_second),
+        "input_cost_per_video_per_second": float(rates.input_video_per_second),
+        "input_cost_per_image": float(rates.per_image),
+        "free_input_image_count": rates.free_images,
+    }
+
+
+def _copy_completed_at(video: VideoObject, value: object) -> None:
+    completed: Final = _whole_number(value)
+    if completed:
+        video.completed_at = completed
+
+
 def _api_root(api_base: str | None) -> str:
     root = (api_base or _DEFAULT_API_BASE).rstrip("/")
     if root.endswith("/v1"):
@@ -331,7 +359,13 @@ class MinimaxVideoConfig(BaseVideoConfig):
         video = _video_object(job_id, _map_status(task.get("status")), model)
         cost = minimax_completed_cost(payload, self._model_info)
         if cost is not None:
-            video.usage = {"provider_reported_cost_usd": cost}
+            billed_usage: Final = _minimax_billed_usage(payload, self._model_info, cost)
+            video.usage = billed_usage
+            output_seconds = billed_usage.get("duration_seconds")
+            if isinstance(output_seconds, int):
+                video.seconds = str(output_seconds)
+        if isinstance(task, dict):
+            _copy_completed_at(video, task.get("completed_at"))
         if custom_llm_provider:
             video.id = encode_video_id_with_provider(job_id, custom_llm_provider, model)
         return video

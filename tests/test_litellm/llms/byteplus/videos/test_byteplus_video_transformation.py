@@ -154,7 +154,12 @@ class TestBytePlusVideoTransformation:
         assert url.endswith("/api/v3/contents/generations/tasks/cgt-2026-abc")
         assert "~" not in url
         assert video.status == "completed"
-        assert video.usage == {"provider_reported_cost_usd": 6.4}
+        assert video.usage == {
+            "provider_reported_cost_usd": 6.4,
+            "total_tokens": 1_000_000,
+            "video_resolution": "720p",
+            "output_cost_per_video_token_with_video_input_720p": 0.0000064,
+        }
         decoded = decode_video_id_with_provider(video.id)
         assert decoded.get("video_id") == "cgt-2026-abc~video"
 

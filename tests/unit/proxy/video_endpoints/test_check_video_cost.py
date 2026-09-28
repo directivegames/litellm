@@ -291,6 +291,8 @@ class TestBilledWhenTheJobFinishes:
         stack.providers.reply("GET", *status)
 
         video = await stack.create(model, **params)
+        started = datetime.now(timezone.utc) - timedelta(minutes=2)
+        stack.table.rows[0].created_at = started
         await stack.poll(cycles=2)
 
         assert [kwargs["response_cost"] for kwargs, _ in stack.spend.create_charges()] == [0.0]
@@ -299,6 +301,27 @@ class TestBilledWhenTheJobFinishes:
         kwargs, billed = charges[0]
         assert kwargs["response_cost"] == pytest.approx(cost)
         assert kwargs["standard_logging_object"]["response_cost"] == pytest.approx(cost)
+        logged = kwargs["standard_logging_object"]
+        assert logged["endTime"] - logged["startTime"] == pytest.approx(120, abs=5)
+        assert billed.usage["provider_reported_cost_usd"] == pytest.approx(cost)
+        if model.startswith("minimax/"):
+            assert logged["metadata"]["usage_object"]["duration_seconds"] == 5
+            assert billed.usage["duration_seconds"] == 5
+            assert billed.usage["input_seconds"] == (3 if "content" in params else 0)
+            assert billed.usage["output_cost_per_second"] == pytest.approx(0.08)
+            assert billed.seconds == "5"
+        elif model.startswith("bytedance/"):
+            assert billed.usage["total_tokens"] == 100_000
+            assert logged["total_tokens"] == 100_000
+            assert billed.usage["video_resolution"] == "720p"
+            rate_key = (
+                "output_cost_per_video_token_with_video_input_720p"
+                if "content" in params
+                else "output_cost_per_video_token_without_video_input_720p"
+            )
+            assert billed.usage[rate_key] == pytest.approx(0.0000107 if "content" not in params else 0.0000064)
+        else:
+            assert set(billed.usage) == {"provider_reported_cost_usd"}
         assert billed.id == video.id
         metadata = kwargs["litellm_params"]["metadata"]
         assert metadata["user_api_key"] == "hashed-key"
@@ -309,6 +332,24 @@ class TestBilledWhenTheJobFinishes:
         (row,) = stack.table.rows
         assert (row.status, row.batch_processed) == ("completed", True)
         assert stack.alerts.messages == []
+
+    @pytest.mark.asyncio
+    async def test_the_finish_log_ends_when_the_provider_says_the_job_completed(self, stack: Stack) -> None:
+        completed = int(datetime.now(timezone.utc).timestamp()) - 30
+        started = datetime.now(timezone.utc) - timedelta(minutes=3)
+        body = _minimax_task()
+        body["task"]["completed_at"] = completed
+        stack.providers.reply("POST", MINIMAX_CREATE, {"task_id": "mm-task", "status": "queued"})
+        stack.providers.reply("GET", MINIMAX_STATUS, body)
+
+        await stack.create("minimax/hailuo-3", duration=5, resolution="768P")
+        stack.table.rows[0].created_at = started
+        await stack.poll(cycles=2)
+
+        kwargs, _billed = stack.spend.poll_charges()[0]
+        logged = kwargs["standard_logging_object"]
+        assert logged["startTime"] == pytest.approx(started.timestamp(), abs=1)
+        assert logged["endTime"] == pytest.approx(completed, abs=1)
 
     @pytest.mark.asyncio
     async def test_a_running_job_is_not_billed(self, stack: Stack) -> None:
