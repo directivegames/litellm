@@ -18,6 +18,7 @@ from litellm.proxy.common_utils.openai_endpoint_utils import (
 from litellm.proxy.image_endpoints.endpoints import batch_to_bytesio
 from litellm.proxy.video_endpoints.utils import (
     encode_character_id_in_response,
+    encode_video_id_in_response,
     extract_model_from_target_model_names,
     get_custom_provider_from_data,
     video_reference_to_id,
@@ -115,7 +116,7 @@ async def video_generation(
             version=version,
         )
     else:
-        return generated
+        return encode_video_id_in_response(generated)
 
 
 @router.get(
@@ -302,7 +303,7 @@ async def video_status(
             version=version,
         )
     else:
-        return status
+        return encode_video_id_in_response(status, model_id_from_decoded)
 
 
 @router.get(
@@ -510,7 +511,7 @@ async def video_remix(
             version=version,
         )
     else:
-        return remixed
+        return encode_video_id_in_response(remixed, model_id_from_decoded)
 
 
 @router.post(
@@ -823,7 +824,7 @@ async def video_edit(
             version=version,
         )
     else:
-        return edited
+        return encode_video_id_in_response(edited, model_id_from_decoded)
 
 
 @router.post(
@@ -920,4 +921,4 @@ async def video_extension(
             version=version,
         )
     else:
-        return extended
+        return encode_video_id_in_response(extended, model_id_from_decoded)

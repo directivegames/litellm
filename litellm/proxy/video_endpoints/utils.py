@@ -2,7 +2,11 @@ from typing import Any, Final
 
 import orjson
 
-from litellm.types.videos.utils import encode_character_id_with_provider
+from litellm.types.videos.utils import (
+    decode_video_id_with_provider,
+    encode_character_id_with_provider,
+    encode_video_id_with_provider,
+)
 
 
 def extract_model_from_target_model_names(target_model_names: Any) -> str | None:
@@ -45,6 +49,36 @@ def get_custom_provider_from_data(data: dict[str, Any]) -> str | None:
             return extra_body_custom_llm_provider
 
     return None
+
+
+def encode_video_id_in_response(response: Any, fallback_model_id: str | None = None) -> Any:
+    """
+    Record the router deployment id in a returned video id.
+
+    Provider adapters encode the provider's model name, which can match several deployments
+    (a direct row and an OpenRouter row can share minimax/hailuo-3). A deployment id resolves to
+    exactly one. Ids the adapter left unencoded are returned as the provider sent them.
+    """
+    hidden_params: Final = getattr(response, "_hidden_params", None) or {}
+    model_id: Final = hidden_params.get("model_id") or fallback_model_id
+    if not model_id:
+        return response
+
+    video_id: Final = response.get("id") if isinstance(response, dict) else getattr(response, "id", None)
+    if not isinstance(video_id, str) or not video_id:
+        return response
+
+    decoded: Final = decode_video_id_with_provider(video_id)
+    provider: Final = decoded.get("custom_llm_provider")
+    if not provider:
+        return response
+
+    encoded: Final = encode_video_id_with_provider(decoded.get("video_id") or video_id, provider, model_id)
+    if isinstance(response, dict):
+        response["id"] = encoded
+    else:
+        response.id = encoded
+    return response
 
 
 def encode_character_id_in_response(response: Any, custom_llm_provider: str, model_id: str | None) -> Any:
