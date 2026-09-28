@@ -8,6 +8,7 @@ import { getSpendString } from "@/utils/dataUtils";
 
 import { getProviderLogoAndName } from "../provider_info_helpers";
 import { getBatchIdFromRequestId, getBatchRequestCounts, isBatchCallType } from "./batchLogUtils";
+import { getVideoIdFromCostRequestId } from "./videoLogUtils";
 import type { LogEntry } from "./columns";
 import { AGENT_CALL_TYPES, MCP_CALL_TYPES } from "./constants";
 import { AgentBadge, AgentIcon, BatchBadge, LlmBadge, McpBadge, SparkleIcon, WrenchIcon } from "./TypeBadges";
@@ -157,6 +158,15 @@ export const getRequestLogsTableColumns = ({
           <div className="flex flex-col">
             <IdCell value={batchId} variant="plain" copyable tooltip={`Batch ${batchId} (row: ${log.request_id})`} />
             <span className="text-[10px] text-muted-foreground">batch cost</span>
+          </div>
+        );
+      }
+      const videoId = getVideoIdFromCostRequestId(log.call_type, log.request_id);
+      if (videoId) {
+        return (
+          <div className="flex flex-col">
+            <IdCell value={videoId} variant="plain" copyable tooltip={`Video ${videoId} (row: ${log.request_id})`} />
+            <span className="text-[10px] text-muted-foreground">video cost</span>
           </div>
         );
       }

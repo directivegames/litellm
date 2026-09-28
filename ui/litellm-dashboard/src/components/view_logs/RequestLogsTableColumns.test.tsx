@@ -274,6 +274,16 @@ describe("batch rows", () => {
   });
 });
 
+describe("video cost rows", () => {
+  it("shows the video id and a video cost label on a finish row", () => {
+    renderRows([logEntry({ request_id: "video_abc_video_cost", call_type: "avideo_retrieve" })]);
+
+    expect(screen.getByText("video_abc")).toBeInTheDocument();
+    expect(screen.getByText("video cost")).toBeInTheDocument();
+    expect(screen.queryByText("video_abc_video_cost")).not.toBeInTheDocument();
+  });
+});
+
 describe("Model column", () => {
   it("lists every model used across a conversation, not only the representative call's model", () => {
     const conversationCall: Partial<LogEntry> = {

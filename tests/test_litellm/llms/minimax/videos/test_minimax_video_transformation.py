@@ -147,7 +147,18 @@ class TestMinimaxVideoTransformation:
         video = _status(self.config, RATES, _task())
 
         assert video.status == "completed"
-        assert video.usage == {"provider_reported_cost_usd": 0.4}
+        assert video.seconds == "5"
+        assert video.usage == {
+            "provider_reported_cost_usd": 0.4,
+            "duration_seconds": 5,
+            "input_seconds": 0,
+            "input_image_count": 0,
+            "video_resolution": "768p",
+            "output_cost_per_second": 0.08,
+            "input_cost_per_video_per_second": 0.08,
+            "input_cost_per_image": 0.04,
+            "free_input_image_count": 5,
+        }
 
     def test_succeeded_status_without_rates_raises(self) -> None:
         with pytest.raises(ValueError, match="free_input_image_count"):

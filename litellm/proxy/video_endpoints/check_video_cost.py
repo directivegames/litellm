@@ -12,6 +12,10 @@ The caller's own status checks and downloads never bill (NON_INFERENCE_CALL_TYPE
 does not depend on the caller polling, or on how often. Every path that leaves a job unbilled
 logs an error and sends a failed-tracking alert.
 
+The finish spend row's request id is the video id plus _video_cost, so it is not dropped as a
+duplicate of the create row. Its start and end are the job's lifetime, which is what the logs
+page shows as Duration.
+
 Callers: the /videos create endpoint (record_pending_video_job) and
 ProxyStartupEvent.initialize_scheduled_background_jobs (CheckVideoCost).
 """
@@ -66,6 +70,8 @@ class _VideoJobRow(Protocol):
     def status(self) -> str | None: ...
     @property
     def file_object(self) -> object: ...
+    @property
+    def created_at(self) -> datetime: ...
 
 
 class _VideoJobTable(Protocol):
@@ -230,6 +236,29 @@ def _video_config(provider: str) -> "BaseVideoConfig | None":
     except ValueError:
         return None
     return ProviderConfigManager.get_provider_video_config(model=None, provider=llm_provider)
+
+
+def _positive_unix_time(value: object) -> datetime | None:
+    """A provider timestamp in seconds, or nothing when the field was omitted or filled with 0."""
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return datetime.fromtimestamp(value, timezone.utc)
+
+
+def _generation_times(job: _VideoJobRow, video: "VideoObject") -> tuple[datetime, datetime]:
+    """When the job was recorded, and when it finished.
+
+    The finish row's Duration column is this span. The video object's own created_at is
+    not the start: adapters fill 0 when the provider omits it.
+    """
+    end: Final = _positive_unix_time(video.completed_at) or datetime.now(timezone.utc)
+    start: Final = job.created_at
+    if not isinstance(start, datetime):
+        return end, end
+    aware: Final = start if start.tzinfo is not None else start.replace(tzinfo=timezone.utc)
+    if aware > end:
+        return end, end
+    return aware, end
 
 
 def _reported_cost(video: "VideoObject") -> float | None:
@@ -420,7 +449,8 @@ class CheckVideoCost:
         }
         model: Final = video.model or (deployment.litellm_params.model if deployment is not None else "")
         logging_obj: Final = _logging_obj(model, "<video_cost_poll>", params, record.custom_llm_provider)
-        await logging_obj.async_success_handler(result=billed)
+        start_time, end_time = _generation_times(job, video)
+        await logging_obj.async_success_handler(result=billed, start_time=start_time, end_time=end_time)
 
 
 def _logging_obj(
