@@ -16,6 +16,10 @@ VIDEO_ID_PREFIX: Final = "video_"
 VIDEO_ID_SERVED_MODEL_PREFIX: Final = "served_model:"
 CHARACTER_ID_PREFIX: Final = "character_"
 CHARACTER_ID_TEMPLATE: Final = "litellm:custom_llm_provider:{};model_id:{};character_id:{}"
+# _hidden_params key on a created VideoObject whose price is only known when the job
+# finishes. The value is the provider job id the proxy's video cost poller checks; it can
+# carry facts the price needs that the caller's video id must not.
+VIDEO_COST_POLL_ID_KEY: Final = "video_cost_poll_id"
 
 
 class DecodedCharacterId(dict):

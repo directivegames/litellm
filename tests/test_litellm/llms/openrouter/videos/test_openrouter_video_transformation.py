@@ -3,10 +3,11 @@
 from unittest.mock import Mock
 
 import httpx
+import pytest
 
 from litellm.llms.openrouter.videos.transformation import OpenRouterVideoConfig, openrouter_completed_cost
 from litellm.types.router import GenericLiteLLMParams
-from litellm.types.videos.utils import decode_video_id_with_provider
+from litellm.types.videos.utils import VIDEO_COST_POLL_ID_KEY, decode_video_id_with_provider
 
 
 def _response(payload: dict) -> httpx.Response:
@@ -50,6 +51,7 @@ class TestOpenRouterVideoTransformation:
         assert decoded.get("custom_llm_provider") == "openrouter"
         assert decoded.get("video_id") == "job-abc123"
         assert video.usage == {}
+        assert video._hidden_params[VIDEO_COST_POLL_ID_KEY] == "job-abc123"
 
     def test_completed_status_reports_usage_cost(self) -> None:
         video = self.config.transform_video_status_retrieve_response(
@@ -77,6 +79,17 @@ class TestOpenRouterVideoTransformation:
 
         assert url == "https://openrouter.ai/api/v1/videos/job-1/content"
         assert params == {}
+
+    def test_jobs_the_cost_poller_never_sees_are_refused(self) -> None:
+        common = {"video_id": "job-1", "api_base": "https://openrouter.ai/api/v1/videos", "headers": {}}
+        params = GenericLiteLLMParams()
+
+        with pytest.raises(NotImplementedError, match="remix"):
+            self.config.transform_video_remix_request(prompt="again", litellm_params=params, **common)
+        with pytest.raises(NotImplementedError, match="edit"):
+            self.config.transform_video_edit_request(prompt="again", litellm_params=params, **common)
+        with pytest.raises(NotImplementedError, match="extension"):
+            self.config.transform_video_extension_request(prompt="again", seconds="4", litellm_params=params, **common)
 
 
 class TestOpenRouterCompletedCost:

@@ -30,7 +30,12 @@ from litellm.litellm_core_utils.initialize_dynamic_callback_params import initia
 from litellm.types.utils import (
     BACKGROUND_RESPONSE_COST_POLL_CALL_ORIGIN,
     BACKGROUND_RESPONSE_STATUS_POLL_CALL_ORIGIN,
+    BACKGROUND_VIDEO_COST_POLL_CALL_ORIGIN,
     InternalCallOrigin,
+)
+
+_BILLED_READ_ORIGINS: Final = frozenset(
+    {BACKGROUND_RESPONSE_COST_POLL_CALL_ORIGIN, BACKGROUND_VIDEO_COST_POLL_CALL_ORIGIN}
 )
 
 BUDGET_RESERVATION_METADATA_KEYS: Final = frozenset({"user_api_key_budget_reservation"})
@@ -111,14 +116,15 @@ def is_unbilled_non_inference_call(
     ``BACKGROUND_RESPONSE_COST_POLL_CALL_ORIGIN``, bills the job. A streamed background create
     the proxy tracks carries the same marker and is free for the same reason. Any other
     read of a background response (the SDK, a proxy without a database) is the only place its
-    spend is ever visible, so it prices normally.
+    spend is ever visible, so it prices normally. The proxy's video cost poller bills a finished
+    video job the same way, with a read stamped ``BACKGROUND_VIDEO_COST_POLL_CALL_ORIGIN``.
     """
     if not _may_be_unbilled(call_type, response):
         return False
     if call_type in _RESPONSE_CREATE_CALL_TYPES:
         return _is_managed_background_call(metadata)
     origin: Final = metadata.get(INTERNAL_CALL_ORIGIN_METADATA_KEY) if metadata is not None else None
-    if origin == BACKGROUND_RESPONSE_COST_POLL_CALL_ORIGIN:
+    if origin in _BILLED_READ_ORIGINS:
         return False
     if not is_background_response(response):
         return True

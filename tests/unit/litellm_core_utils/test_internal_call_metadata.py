@@ -1,5 +1,7 @@
 """Unit tests for internal-call metadata forwarding: budget-reservation stripping and origin stamping."""
 
+import pytest
+
 from litellm.constants import INTERNAL_CALL_ORIGIN_METADATA_KEY, MANAGED_BACKGROUND_RESPONSE_METADATA_KEY
 from litellm.litellm_core_utils.internal_call_metadata import (
     forwarded_internal_call_metadata,
@@ -10,6 +12,7 @@ from litellm.litellm_core_utils.internal_call_metadata import (
 from litellm.types.utils import (
     BACKGROUND_RESPONSE_COST_POLL_CALL_ORIGIN,
     BACKGROUND_RESPONSE_STATUS_POLL_CALL_ORIGIN,
+    BACKGROUND_VIDEO_COST_POLL_CALL_ORIGIN,
     SHADOW_EVAL_ROUTER_CALL_ORIGIN,
 )
 
@@ -191,3 +194,13 @@ class TestNonInferenceCallBilling:
             assert is_unbilled_non_inference_call_from_params(
                 "aresponses", {"litellm_metadata": self.MANAGED_READ}, logged
             ) is True
+
+
+@pytest.mark.parametrize("call_type", ["avideo_retrieve", "video_status", "avideo_content", "avideo_list"])
+def test_a_callers_video_read_is_unbilled(call_type):
+    assert is_unbilled_non_inference_call(call_type, {}, object()) is True
+
+
+def test_the_video_cost_pollers_read_is_billed():
+    metadata = {INTERNAL_CALL_ORIGIN_METADATA_KEY: BACKGROUND_VIDEO_COST_POLL_CALL_ORIGIN}
+    assert is_unbilled_non_inference_call("avideo_retrieve", metadata, object()) is False

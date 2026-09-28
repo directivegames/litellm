@@ -4,19 +4,25 @@ Callers: ProviderConfigManager.get_provider_video_config.
 OpenRouterVideoConfig, openrouter_completed_cost.
 
 The upstream model stays the OpenRouter catalog name, such as minimax/hailuo-3.
-Cost is the completed job's usage.cost. Create does not bill.
+Cost is the completed job's usage.cost. Create does not bill; it hands the job id to
+the proxy's video cost poller (VIDEO_COST_POLL_ID_KEY), which bills the finished job.
+Remix, edit, and extension are refused: only create records a job for the poller, so
+a job started any other way would never be billed.
 """
 
 import math
-from typing import Any, Final
+from collections.abc import Mapping
+from typing import Any, Final, NoReturn
 
 import httpx
+from httpx._types import FileContent
 
 import litellm
 from litellm.llms.openai.videos.transformation import OpenAIVideoConfig
 from litellm.secret_managers.main import get_secret_str
 from litellm.types.router import GenericLiteLLMParams
 from litellm.types.videos.main import VideoCreateOptionalRequestParams, VideoObject
+from litellm.types.videos.utils import VIDEO_COST_POLL_ID_KEY, extract_original_video_id
 
 _DEFAULT_API_BASE: Final = "https://openrouter.ai/api/v1"
 _FORWARDED: Final = (
@@ -98,7 +104,9 @@ class OpenRouterVideoConfig(OpenAIVideoConfig):
         headers: dict,
     ) -> tuple[dict, list, str]:
         body: dict[str, object] = {"model": model, "prompt": prompt}
-        duration = video_create_optional_request_params.get("duration", video_create_optional_request_params.get("seconds"))
+        duration = video_create_optional_request_params.get(
+            "duration", video_create_optional_request_params.get("seconds")
+        )
         if duration is not None:
             body["duration"] = duration
         for key in ("resolution", "ratio", "aspect_ratio", "generate_audio", "size"):
@@ -124,6 +132,7 @@ class OpenRouterVideoConfig(OpenAIVideoConfig):
         )
         # Create has no finished price. Leave usage empty so this call is not billed.
         video.usage = {}
+        video._hidden_params[VIDEO_COST_POLL_ID_KEY] = extract_original_video_id(video.id)  # pyright: ignore[reportPrivateUsage]  # the proxy reads adapter facts here
         return video
 
     def transform_video_status_retrieve_response(
@@ -142,6 +151,42 @@ class OpenRouterVideoConfig(OpenAIVideoConfig):
         if cost is not None:
             video.usage = {"provider_reported_cost_usd": cost}
         return video
+
+    def transform_video_remix_request(
+        self,
+        video_id: str,
+        prompt: str,
+        api_base: str,
+        litellm_params: GenericLiteLLMParams,
+        headers: Mapping[str, object],
+        extra_body: Mapping[str, object] | None = None,
+    ) -> NoReturn:
+        raise NotImplementedError("Video remix is not supported for OpenRouter")
+
+    def transform_video_edit_request(
+        self,
+        prompt: str,
+        video_id: str,
+        api_base: str,
+        litellm_params: GenericLiteLLMParams,
+        headers: Mapping[str, object],
+        video_file: FileContent | None = None,
+        extra_body: Mapping[str, object] | None = None,
+        prefetched_source_data: Mapping[str, object] | None = None,
+    ) -> NoReturn:
+        raise NotImplementedError("Video edit is not supported for OpenRouter")
+
+    def transform_video_extension_request(
+        self,
+        prompt: str,
+        video_id: str,
+        seconds: str,
+        api_base: str,
+        litellm_params: GenericLiteLLMParams,
+        headers: Mapping[str, object],
+        extra_body: Mapping[str, object] | None = None,
+    ) -> NoReturn:
+        raise NotImplementedError("Video extension is not supported for OpenRouter")
 
 
 def _normalized(raw_response: httpx.Response) -> httpx.Response:
