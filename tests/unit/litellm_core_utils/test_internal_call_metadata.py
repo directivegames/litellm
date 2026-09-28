@@ -1,11 +1,14 @@
 """Unit tests for internal-call metadata forwarding: budget-reservation stripping and origin stamping."""
 
+import pytest
+
 from litellm.constants import INTERNAL_CALL_ORIGIN_METADATA_KEY
 from litellm.litellm_core_utils.internal_call_metadata import (
     forwarded_internal_call_metadata,
+    is_unbilled_non_inference_call,
     sanitized_forwardable_call_metadata,
 )
-from litellm.types.utils import SHADOW_EVAL_ROUTER_CALL_ORIGIN
+from litellm.types.utils import BACKGROUND_VIDEO_COST_POLL_CALL_ORIGIN, SHADOW_EVAL_ROUTER_CALL_ORIGIN
 
 PARENT = {
     "user_api_key": "sk-hash",
@@ -119,3 +122,13 @@ class TestSubCallMetadataSanitization:
         assert sanitized_auth.team_id == "team-1"
         assert sanitized_auth.api_key == auth.api_key
         assert auth.budget_reservation == {"reserved_cost": 1.0}
+
+
+@pytest.mark.parametrize("call_type", ["avideo_retrieve", "video_status", "avideo_content", "avideo_list"])
+def test_a_callers_video_read_is_unbilled(call_type):
+    assert is_unbilled_non_inference_call(call_type, {}, object()) is True
+
+
+def test_the_video_cost_pollers_read_is_billed():
+    metadata = {INTERNAL_CALL_ORIGIN_METADATA_KEY: BACKGROUND_VIDEO_COST_POLL_CALL_ORIGIN}
+    assert is_unbilled_non_inference_call("avideo_retrieve", metadata, object()) is False

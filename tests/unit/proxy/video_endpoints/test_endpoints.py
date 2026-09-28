@@ -26,8 +26,10 @@ patched with autospec so the real __init__ still stores self.data (captured via 
 mock's call args), and a brand-new kwarg added to this layer surfaces as a failure.
 """
 
+import json
 from contextlib import ExitStack
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, Dict, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -44,6 +46,7 @@ from litellm.proxy.video_endpoints.utils import encode_video_id_in_response
 from litellm.router import Router
 from litellm.types.videos.main import VideoObject
 from litellm.types.videos.utils import (
+    VIDEO_COST_POLL_ID_KEY,
     decode_video_id_with_provider,
     encode_character_id_with_provider,
     encode_video_id_with_provider,
@@ -727,6 +730,33 @@ async def test_generation__returned_id_records_the_deployment_id(harness):
 
     decoded = decode_video_id_with_provider(resp.id)
     assert decoded == {"custom_llm_provider": "openrouter", "model_id": "dep-openrouter", "video_id": "gen-1"}
+
+
+class _JobTable:
+    def __init__(self) -> None:
+        self.created: list[dict] = []
+
+    async def create(self, data: dict) -> None:
+        self.created.append(data)
+
+
+@pytest.mark.asyncio
+async def test_generation__stores_the_job_for_the_cost_poller_under_the_id_the_caller_holds(harness):
+    adapter_id = encode_video_id_with_provider("gen-1", "openrouter", "minimax/hailuo-3")
+    video = _video(adapter_id, model_id="dep-openrouter")
+    video._hidden_params[VIDEO_COST_POLL_ID_KEY] = "gen-1"
+    harness.base_process.return_value = video
+    table = _JobTable()
+    prisma = SimpleNamespace(db=SimpleNamespace(litellm_managedobjecttable=table))
+
+    with patch.object(proxy_server, "prisma_client", prisma):  # test-quality-ok: the endpoint's database is this global
+        resp = await call_generation(harness, body={"model": "openrouter/minimax/hailuo-3", "prompt": "x"})
+
+    (row,) = table.created
+    assert row["unified_object_id"] == resp.id
+    assert row["api_key"] == _user().api_key
+    record = json.loads(row["file_object"])
+    assert (record["poll_video_id"], record["model_id"]) == ("gen-1", "dep-openrouter")
 
 
 @pytest.mark.asyncio

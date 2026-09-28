@@ -11,7 +11,11 @@ from litellm.llms.byteplus.videos.transformation import (
     split_rate_class,
 )
 from litellm.types.router import GenericLiteLLMParams
-from litellm.types.videos.utils import decode_video_id_with_provider, encode_video_id_with_provider
+from litellm.types.videos.utils import (
+    VIDEO_COST_POLL_ID_KEY,
+    decode_video_id_with_provider,
+    encode_video_id_with_provider,
+)
 
 # Seedance 2.5 list prices per million tokens, as a deployment would set them:
 # $10.70 and $6.40 at 480p and 720p, $11.70 and $7.00 at 1080p.
@@ -118,19 +122,31 @@ class TestBytePlusVideoTransformation:
         with pytest.raises(ValueError, match="output_cost_per_video_token_without_video_input_480p"):
             _create(self.config, {**RATES, "output_cost_per_video_token_without_video_input_480p": True})
 
-    def test_create_response_suffixes_the_input_class(self) -> None:
-        video = self.config.transform_video_create_response(
+    def _created(self, request_data: dict | None):
+        return self.config.transform_video_create_response(
             model="dreamina-seedance-2-5-260628",
             raw_response=_response({"id": "cgt-1"}),
             logging_obj=Mock(),
             custom_llm_provider="byteplus",
-            request_data={"content": _VIDEO_CONTENT},
+            request_data=request_data,
         )
+
+    def test_create_response_hands_the_poller_the_input_class(self) -> None:
+        video = self._created({"content": _VIDEO_CONTENT})
+
+        assert split_rate_class(video._hidden_params[VIDEO_COST_POLL_ID_KEY]) == ("cgt-1", "video")
+        assert video.usage in (None, {})
+
+    def test_the_callers_video_id_carries_no_input_class(self) -> None:
+        video = self._created({"content": _VIDEO_CONTENT})
 
         decoded = decode_video_id_with_provider(video.id)
         assert decoded.get("custom_llm_provider") == "byteplus"
-        assert split_rate_class(decoded.get("video_id") or "") == ("cgt-1", "video")
-        assert video.usage in (None, {})
+        assert decoded.get("video_id") == "cgt-1"
+
+    def test_a_text_only_create_is_polled_at_the_plain_rate(self) -> None:
+        video = self._created({"content": [{"type": "text", "text": "a boat"}]})
+        assert video._hidden_params[VIDEO_COST_POLL_ID_KEY] == "cgt-1~plain"
 
     def test_status_strips_the_suffix_and_bills_the_video_rate(self) -> None:
         url, video = _status(self.config, RATES, "cgt-2026-abc~video", _job())
@@ -150,7 +166,7 @@ class TestBytePlusVideoTransformation:
         _url, video = _status(self.config, None, "cgt-2026-abc~plain", _job(status="running"))
         assert video.usage is None
 
-    def test_a_missing_input_class_is_not_billed(self) -> None:
+    def test_a_callers_status_check_is_not_billed(self) -> None:
         _url, video = _status(self.config, RATES, "cgt-2026-abc", _job())
         assert video.usage is None
 
@@ -179,3 +195,14 @@ class TestSeedanceCompletedCost:
 
     def test_ignores_a_job_that_is_still_running(self) -> None:
         assert seedance_completed_cost(_job(status="running"), "plain", RATES) is None
+
+    def test_bills_a_whole_token_count_sent_as_a_float(self) -> None:
+        assert seedance_completed_cost(_job(usage={"total_tokens": 1_000_000.0}), "plain", RATES) == 10.7
+
+    @pytest.mark.parametrize(
+        "tokens",
+        [0, 1_000_000.5, -1, True, float("nan"), float("inf"), "1000000", None],
+        ids=["zero", "fraction", "negative", "bool", "nan", "inf", "string", "missing"],
+    )
+    def test_does_not_bill_a_token_count_that_is_not_a_positive_whole_number(self, tokens: object) -> None:
+        assert seedance_completed_cost(_job(usage={"total_tokens": tokens}), "plain", RATES) is None

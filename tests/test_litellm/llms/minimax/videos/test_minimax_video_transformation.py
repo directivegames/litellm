@@ -7,7 +7,7 @@ import pytest
 
 from litellm.llms.minimax.videos.transformation import MinimaxVideoConfig, minimax_completed_cost
 from litellm.types.router import GenericLiteLLMParams
-from litellm.types.videos.utils import decode_video_id_with_provider
+from litellm.types.videos.utils import VIDEO_COST_POLL_ID_KEY, decode_video_id_with_provider
 
 # MiniMax-H3 pay-as-you-go list prices, as a deployment would set them.
 RATES: dict[str, object] = {
@@ -117,6 +117,32 @@ class TestMinimaxVideoTransformation:
         assert video.status == "queued"
         assert video.usage in (None, {})
 
+    def _create_and_respond(self, params: dict):
+        data, _files, _url = _create(self.config, RATES, params)
+        return self.config.transform_video_create_response(
+            model="MiniMax-H3",
+            raw_response=_response({"task_id": "4240", "status": "queued"}),
+            logging_obj=Mock(),
+            custom_llm_provider="minimax",
+            request_data=data,
+        )
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            None,
+            [{"type": "image_url", "image_url": {"url": f"https://cdn.example/{n}.png"}} for n in range(7)],
+            [{"type": "video_url", "video_url": {"url": "https://cdn.example/in.mp4"}}],
+        ],
+        ids=["text", "images", "input_video"],
+    )
+    def test_every_job_bills_when_it_finishes(self, content: list | None) -> None:
+        params: dict[str, object] = {"duration": 5, "resolution": "768P"}
+        video = self._create_and_respond(params if content is None else {**params, "content": content})
+
+        assert video.usage in (None, {})
+        assert video._hidden_params[VIDEO_COST_POLL_ID_KEY] == "4240"
+
     def test_succeeded_status_reports_the_configured_cost(self) -> None:
         video = _status(self.config, RATES, _task())
 
@@ -152,7 +178,9 @@ class TestMinimaxVideoTransformation:
 
     def test_remix_is_not_implemented(self) -> None:
         with pytest.raises(NotImplementedError):
-            self.config.transform_video_remix_request("id", "prompt", "https://api.minimax.io", GenericLiteLLMParams(), {})
+            self.config.transform_video_remix_request(
+                "id", "prompt", "https://api.minimax.io", GenericLiteLLMParams(), {}
+            )
 
 
 class TestMinimaxCompletedCost:
@@ -187,3 +215,16 @@ class TestMinimaxCompletedCost:
 
     def test_a_zero_rate_is_free_not_missing(self) -> None:
         assert minimax_completed_cost(_task(), {**RATES, "output_cost_per_second_768p": 0}) is None
+
+    def test_bills_whole_counts_sent_as_floats(self) -> None:
+        body = _task(resolution="2K", usage={"output_seconds": 5.0, "input_seconds": 2.0, "input_image_count": 6.0})
+        assert minimax_completed_cost(body, RATES) == 0.95
+
+    @pytest.mark.parametrize(
+        "count",
+        [5.5, -1, True, float("nan"), float("inf"), "5", None],
+        ids=["fraction", "negative", "bool", "nan", "inf", "string", "missing"],
+    )
+    def test_does_not_bill_a_count_that_is_not_a_whole_number(self, count: object) -> None:
+        body = _task(usage={"output_seconds": count, "input_seconds": 0, "input_image_count": 0})
+        assert minimax_completed_cost(body, RATES) is None
