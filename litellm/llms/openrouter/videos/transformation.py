@@ -4,7 +4,8 @@ Callers: ProviderConfigManager.get_provider_video_config.
 OpenRouterVideoConfig, openrouter_completed_cost.
 
 The upstream model stays the OpenRouter catalog name, such as minimax/hailuo-3.
-Cost is the completed job's usage.cost. Create does not bill; it hands the job id to
+Cost is the completed job's usage.cost. The finished usage keeps the provider's other
+usage fields and a top-level duration. Create does not bill; it hands the job id to
 the proxy's video cost poller (VIDEO_COST_POLL_ID_KEY), which bills the finished job.
 Remix, edit, and extension are refused: only create records a job for the poller, so
 a job started any other way would never be billed.
@@ -34,6 +35,34 @@ _FORWARDED: Final = (
     "generate_audio",
     "size",
 )
+
+
+def _length_seconds(value: object) -> float | None:
+    if isinstance(value, str):
+        try:
+            value = float(value)
+        except ValueError:
+            return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+        return None
+    return float(value)
+
+
+def _openrouter_billed_usage(body: object, cost: float) -> dict[str, object]:
+    """The provider price, plus any tokens or length the status body already carried."""
+    usage: dict[str, object] = {"provider_reported_cost_usd": cost}
+    if not isinstance(body, dict):
+        return usage
+    raw = body.get("usage")
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            if key not in {"cost", "provider_reported_cost_usd"}:
+                usage[key] = value
+    if "duration_seconds" not in usage:
+        length = _length_seconds(body.get("duration", body.get("seconds")))
+        if length is not None:
+            usage["duration_seconds"] = length
+    return usage
 
 
 def openrouter_completed_cost(body: object) -> float | None:
@@ -149,7 +178,7 @@ class OpenRouterVideoConfig(OpenAIVideoConfig):
         )
         cost = openrouter_completed_cost(payload)
         if cost is not None:
-            video.usage = {"provider_reported_cost_usd": cost}
+            video.usage = _openrouter_billed_usage(payload, cost)
         return video
 
     def transform_video_remix_request(
@@ -201,4 +230,11 @@ def _normalized(raw_response: httpx.Response) -> httpx.Response:
         filled["status"] = "queued"
     if filled is payload or filled == payload:
         return raw_response
-    return httpx.Response(status_code=raw_response.status_code, json=filled, headers=raw_response.headers)
+    # httpx decodes while building the response. The new body is plain JSON, so a
+    # copied Content-Encoding makes that decode fail with "incorrect header check".
+    headers = {
+        key: value
+        for key, value in raw_response.headers.items()
+        if key.lower() not in {"content-encoding", "content-length", "transfer-encoding"}
+    }
+    return httpx.Response(status_code=raw_response.status_code, json=filled, headers=headers)

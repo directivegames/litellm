@@ -13,6 +13,7 @@ import litellm
 from litellm._logging import verbose_proxy_logger
 from litellm.constants import (
     EMPTY_MAPPING,
+    INTERNAL_CALL_ORIGIN_METADATA_KEY,
     LITELLM_PROXY_MASTER_KEY_ALIAS,
     LITELLM_TRUNCATED_PAYLOAD_FIELD,
     LITELLM_TRUNCATION_DB_SAFEGUARD_NOTE,
@@ -44,6 +45,7 @@ from litellm.proxy.route_llm_request import ProxyModelNotFoundError
 from litellm.proxy.spend_tracking.spend_log_error_logger import spend_log_error
 from litellm.proxy.utils import PrismaClient, hash_token
 from litellm.types.utils import (
+    BACKGROUND_VIDEO_COST_POLL_CALL_ORIGIN,
     PROMPT_CARRYING_GUARDRAIL_FIELDS,
     CallTypes,
     CostBreakdown,
@@ -221,6 +223,14 @@ def _get_spend_logs_metadata(
 
 
 BATCH_COST_REQUEST_ID_SUFFIX: Final = "_batch_cost"
+VIDEO_COST_REQUEST_ID_SUFFIX: Final = "_video_cost"
+
+
+def _is_background_video_cost_poll(kwargs: Mapping[str, object]) -> bool:
+    metadata: Final = get_litellm_metadata_from_kwargs(dict(kwargs))
+    if not isinstance(metadata, Mapping):
+        return False
+    return metadata.get(INTERNAL_CALL_ORIGIN_METADATA_KEY) == BACKGROUND_VIDEO_COST_POLL_CALL_ORIGIN
 
 
 def get_spend_logs_id(call_type: str, response_obj: dict, kwargs: dict) -> str | None:
@@ -233,8 +243,14 @@ def get_spend_logs_id(call_type: str, response_obj: dict, kwargs: dict) -> str |
     resolved_id: Final = next(
         (candidate for candidate in candidate_ids if isinstance(candidate, str) and candidate), None
     )
-    if resolved_id is not None and call_type == CallTypes.aretrieve_batch.value:
+    if resolved_id is None:
+        return None
+    if call_type == CallTypes.aretrieve_batch.value:
         return f"{resolved_id}{BATCH_COST_REQUEST_ID_SUFFIX}"
+    # The create row already owns this video id. SpendLogs skips duplicate primary keys,
+    # so the finish row would be dropped and the cost would never appear.
+    if _is_background_video_cost_poll(kwargs):
+        return f"{resolved_id}{VIDEO_COST_REQUEST_ID_SUFFIX}"
     return resolved_id
 
 

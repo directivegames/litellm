@@ -11,6 +11,7 @@ from typing_extensions import ReadOnly, TypedDict
 
 import litellm
 from litellm.constants import (
+    INTERNAL_CALL_ORIGIN_METADATA_KEY,
     LITELLM_TRUNCATED_PAYLOAD_FIELD,
     LITELLM_TRUNCATION_DB_SAFEGUARD_NOTE,
     LITTELM_CLI_SERVICE_ACCOUNT_NAME,
@@ -3850,6 +3851,31 @@ async def test_spend_log_request_id_is_untouched_when_no_message_id_was_streamed
 
     assert logged_response.id
     assert not logged_response.id.startswith("msg_")
+
+
+def test_video_cost_poll_row_does_not_collide_with_the_creation_row():
+    """Creating a video writes a row keyed by the video id, so keying the finish row the same
+    way makes the insert a duplicate of it. request_id is the primary key and the flush skips
+    duplicates, so the cost row is dropped with no error. A caller's status retrieve keeps the
+    video id and still collapses onto the create row."""
+    from litellm.types.utils import BACKGROUND_VIDEO_COST_POLL_CALL_ORIGIN
+
+    video_id = "bGl0ZWxsbV9wcm94eTt2aWRlbw"
+    poll_kwargs = {
+        "litellm_call_id": "call-poller",
+        "litellm_params": {
+            "metadata": {INTERNAL_CALL_ORIGIN_METADATA_KEY: BACKGROUND_VIDEO_COST_POLL_CALL_ORIGIN}
+        },
+    }
+
+    creation_row_id = get_spend_logs_id("avideo_generation", {"id": video_id}, {"litellm_call_id": "call-create"})
+    cost_row_id = get_spend_logs_id("avideo_retrieve", {"id": video_id}, poll_kwargs)
+    status_row_id = get_spend_logs_id("avideo_retrieve", {"id": video_id}, {"litellm_call_id": "call-status"})
+
+    assert creation_row_id == video_id
+    assert cost_row_id == f"{video_id}_video_cost"
+    assert cost_row_id != creation_row_id
+    assert status_row_id == video_id
 
 
 def test_batch_cost_row_does_not_collide_with_the_batch_creation_row():

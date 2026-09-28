@@ -1,5 +1,7 @@
 """OpenRouter video adapter. Recorded payloads, no network."""
 
+import gzip
+import json
 from unittest.mock import Mock
 
 import httpx
@@ -12,6 +14,16 @@ from litellm.types.videos.utils import VIDEO_COST_POLL_ID_KEY, decode_video_id_w
 
 def _response(payload: dict) -> httpx.Response:
     return httpx.Response(status_code=200, json=payload)
+
+
+def _gzip_response(payload: dict) -> httpx.Response:
+    """A response httpx has already decoded, still carrying the upstream gzip header."""
+    body = gzip.compress(json.dumps(payload).encode())
+    return httpx.Response(
+        status_code=200,
+        content=body,
+        headers={"content-encoding": "gzip", "content-type": "application/json"},
+    )
 
 
 class TestOpenRouterVideoTransformation:
@@ -62,6 +74,37 @@ class TestOpenRouterVideoTransformation:
 
         assert video.status == "completed"
         assert video.usage == {"provider_reported_cost_usd": 0.5}
+
+    def test_completed_status_keeps_tokens_and_length_beside_the_cost(self) -> None:
+        video = self.config.transform_video_status_retrieve_response(
+            raw_response=_response(
+                {
+                    "id": "job-abc123",
+                    "object": "video",
+                    "status": "completed",
+                    "seconds": "6",
+                    "usage": {"cost": 0.5, "total_tokens": 12},
+                }
+            ),
+            logging_obj=Mock(),
+            custom_llm_provider="openrouter",
+        )
+
+        assert video.usage == {
+            "provider_reported_cost_usd": 0.5,
+            "total_tokens": 12,
+            "duration_seconds": 6.0,
+        }
+
+    def test_gzip_status_response_that_omits_video_fields_still_parses(self) -> None:
+        video = self.config.transform_video_status_retrieve_response(
+            raw_response=_gzip_response({"id": "job-abc123", "status": "pending"}),
+            logging_obj=Mock(),
+            custom_llm_provider="openrouter",
+        )
+
+        assert video.status == "pending"
+        assert video.object == "video"
 
     def test_content_url_uses_the_openrouter_videos_route(self) -> None:
         created = self.config.transform_video_create_response(

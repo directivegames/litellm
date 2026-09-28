@@ -154,6 +154,31 @@ def seedance_completed_cost(body: object, kind: str | None, model_info: Mapping[
     return float(cost)
 
 
+def _seedance_billed_usage(
+    body: Mapping[str, object], kind: str, model_info: Mapping[str, object], cost: float
+) -> dict[str, object]:
+    """The price, the token count, and the per-token rate that produced it."""
+    usage = body.get("usage")
+    tokens = _whole_number(usage.get("total_tokens")) if isinstance(usage, dict) else None
+    resolution = body.get("resolution")
+    resolution_name = resolution.strip().lower() if isinstance(resolution, str) else ""
+    rate_key = RATE_KEYS[kind].format(resolution_name)
+    billed: dict[str, object] = {
+        "provider_reported_cost_usd": cost,
+        "total_tokens": tokens,
+        "video_resolution": resolution_name or None,
+    }
+    if resolution_name:
+        billed[rate_key] = float(seedance_rate(model_info, kind, resolution))
+    return billed
+
+
+def _copy_completed_at(video: VideoObject, value: object) -> None:
+    completed = _whole_number(value)
+    if completed:
+        video.completed_at = completed
+
+
 def _whole_number(value: object) -> int | None:
     # bool is an int subclass; a true/false count is not usage. A JSON count may arrive as 5.0,
     # and refusing it would leave a finished job unbilled. is_integer() is False for nan and inf.
@@ -339,8 +364,9 @@ class BytePlusVideoConfig(BaseVideoConfig):
         if model is not None:
             video.model = model
         cost = seedance_completed_cost(payload, kind, self._model_info)
-        if cost is not None:
-            video.usage = {"provider_reported_cost_usd": cost}
+        if cost is not None and kind is not None:
+            video.usage = _seedance_billed_usage(payload, kind, self._model_info, cost)
+        _copy_completed_at(video, payload.get("completed_at"))
         if custom_llm_provider:
             video.id = encode_video_id_with_provider(stored_id, custom_llm_provider, model)
         return video
