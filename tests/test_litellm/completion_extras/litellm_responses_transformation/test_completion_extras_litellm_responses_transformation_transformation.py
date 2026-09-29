@@ -3198,6 +3198,91 @@ def test_convert_response_output_custom_tool_call_to_tool_calls_choice():
     assert tool_call.function.arguments == "*** Begin Patch\n*** End Patch"
 
 
+def test_reasoning_item_content_fills_reasoning_content_when_summary_is_empty():
+    """Readable text on the reasoning item's content becomes chat reasoning_content.
+
+    Summary text is the fallback. An empty summary must not hide the content text.
+    """
+    from openai.types.responses import ResponseOutputMessage, ResponseOutputText
+    from openai.types.responses.response_reasoning_item import ResponseReasoningItem
+
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        LiteLLMResponsesTransformationHandler,
+    )
+
+    reasoning_item = ResponseReasoningItem(
+        id="rs_content",
+        summary=[],
+        type="reasoning",
+        content=[{"type": "reasoning_text", "text": "step by step"}],
+    )
+    output_message = ResponseOutputMessage(
+        id="msg_content",
+        content=[ResponseOutputText(annotations=[], text="answer", type="output_text", logprobs=[])],
+        role="assistant",
+        status="completed",
+        type="message",
+    )
+
+    choices = LiteLLMResponsesTransformationHandler._convert_response_output_to_choices(
+        [reasoning_item, output_message]
+    )
+
+    assert len(choices) == 1
+    assert choices[0].message.reasoning_content == "step by step"
+
+
+def test_reasoning_item_without_text_sets_empty_reasoning_content():
+    """A reasoning item with no content text and no summary still sets the field.
+
+    The chat message keeps an empty string. A missing field is what clients treat
+    as no reasoning. A dict item follows the same path as a typed item.
+    """
+    from openai.types.responses import ResponseOutputMessage, ResponseOutputText
+    from openai.types.responses.response_reasoning_item import ResponseReasoningItem
+
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        LiteLLMResponsesTransformationHandler,
+    )
+
+    reasoning_item = ResponseReasoningItem(
+        id="rs_empty",
+        summary=[],
+        type="reasoning",
+        content=None,
+    )
+    output_message = ResponseOutputMessage(
+        id="msg_empty",
+        content=[ResponseOutputText(annotations=[], text="answer", type="output_text", logprobs=[])],
+        role="assistant",
+        status="completed",
+        type="message",
+    )
+
+    choices = LiteLLMResponsesTransformationHandler._convert_response_output_to_choices(
+        [reasoning_item, output_message]
+    )
+
+    assert len(choices) == 1
+    assert choices[0].message.reasoning_content == ""
+
+    handler = LiteLLMResponsesTransformationHandler()
+    dict_choices = LiteLLMResponsesTransformationHandler._convert_response_output_to_choices(
+        [
+            {"type": "reasoning", "id": "rs_dict", "summary": [], "content": None},
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "answer"}],
+            },
+        ],
+        handle_raw_dict_callback=handler._handle_raw_dict_response_item,
+    )
+
+    assert len(dict_choices) == 1
+    assert dict_choices[0].message.reasoning_content == ""
+
+
 def test_convert_response_output_accumulates_raw_tool_calls_into_one_choice():
     """Raw dict and generic-pydantic tool-call items must accumulate into the single
     trailing tool_calls choice exactly like typed items. Emitting one choice per tool

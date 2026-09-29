@@ -22,6 +22,7 @@ from unittest.mock import MagicMock, patch
 
 import litellm
 from litellm import main as litellm_main
+from litellm.main import BRIDGE_REASONING_SUMMARY_KEY
 from litellm.integrations.custom_logger import CustomLogger
 from litellm.litellm_core_utils.core_helpers import get_litellm_metadata_from_kwargs
 from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLogging
@@ -1376,6 +1377,119 @@ def test_responses_api_bridge_check_gpt_5_tools_without_summary_stays_chat():
         )
 
     assert model == "gpt-5"
+    assert model_info.get("mode") != "responses"
+
+
+def test_responses_api_bridge_check_gpt_5_nano_effort_without_tools_routes_to_responses():
+    """gpt-5-nano with reasoning_effort and no tools should use Responses.
+
+    Chat Completions accepts the effort and returns the answer with no reasoning field.
+    """
+    from litellm.main import responses_api_bridge_check
+
+    with patch("litellm.main._get_model_info_helper") as mock_get_model_info:
+        mock_get_model_info.return_value = {"max_tokens": 128000}
+        model_info, model = responses_api_bridge_check(
+            model="gpt-5-nano",
+            custom_llm_provider="openai",
+            tools=None,
+            reasoning_effort="minimal",
+            reasoning_summary=None,
+        )
+
+    assert model == "gpt-5-nano"
+    assert model_info.get("mode") == "responses"
+    assert model_info.get(BRIDGE_REASONING_SUMMARY_KEY) == "auto"
+
+
+def test_responses_api_bridge_check_gpt_5_nano_effort_with_custom_tool_stays_chat():
+    """Custom tools with an explicit effort stay on chat for their native tool_call shape."""
+    from litellm.main import responses_api_bridge_check
+
+    with patch("litellm.main._get_model_info_helper") as mock_get_model_info:
+        mock_get_model_info.return_value = {"max_tokens": 128000}
+        model_info, _ = responses_api_bridge_check(
+            model="gpt-5-nano",
+            custom_llm_provider="openai",
+            tools=[{"type": "custom", "custom": {"name": "ApplyPatch"}}],
+            reasoning_effort="low",
+            reasoning_summary=None,
+        )
+
+    assert model_info.get("mode") != "responses"
+    assert BRIDGE_REASONING_SUMMARY_KEY not in model_info
+
+
+def test_responses_api_bridge_check_gpt_5_nano_effort_on_custom_api_base_stays_chat():
+    """An OpenAI-compatible backend on its own api_base may have no /responses route."""
+    from litellm.main import responses_api_bridge_check
+
+    with patch("litellm.main._get_model_info_helper") as mock_get_model_info:
+        mock_get_model_info.return_value = {"max_tokens": 128000}
+        model_info, _ = responses_api_bridge_check(
+            model="gpt-5-nano",
+            custom_llm_provider="openai",
+            tools=None,
+            reasoning_effort="low",
+            reasoning_summary=None,
+            api_base="https://chat-only-backend.example.com/v1",
+        )
+
+    assert model_info.get("mode") != "responses"
+    assert BRIDGE_REASONING_SUMMARY_KEY not in model_info
+
+
+@patch("litellm.completion_extras.responses_api_bridge.completion")
+def test_gpt_5_nano_effort_without_tools_requests_auto_reasoning_summary(
+    mock_responses_completion,
+):
+    """The bridge asks for a summary; an unrequested one comes back empty."""
+    mock_responses_completion.return_value = MagicMock()
+
+    litellm.completion(
+        model="gpt-5-nano",
+        messages=[{"role": "user", "content": "What is the capital of France?"}],
+        reasoning_effort="minimal",
+        api_key="fake-key",
+    )
+
+    optional_params = mock_responses_completion.call_args.kwargs["optional_params"]
+    assert optional_params["reasoning_effort"] == {"effort": "minimal", "summary": "auto"}
+
+
+@patch("litellm.completion_extras.responses_api_bridge.completion")
+def test_gpt_5_nano_effort_without_tools_keeps_caller_reasoning_summary(
+    mock_responses_completion,
+):
+    """A summary the caller chose wins over the bridge default."""
+    mock_responses_completion.return_value = MagicMock()
+
+    litellm.completion(
+        model="gpt-5-nano",
+        messages=[{"role": "user", "content": "What is the capital of France?"}],
+        reasoning_effort={"effort": "low", "summary": "detailed"},
+        api_key="fake-key",
+    )
+
+    optional_params = mock_responses_completion.call_args.kwargs["optional_params"]
+    assert optional_params["reasoning_effort"] == {"effort": "low", "summary": "detailed"}
+
+
+def test_responses_api_bridge_check_reasoning_effort_none_without_tools_stays_chat():
+    """reasoning_effort none with no tools stays on Chat Completions."""
+    from litellm.main import responses_api_bridge_check
+
+    with patch("litellm.main._get_model_info_helper") as mock_get_model_info:
+        mock_get_model_info.return_value = {"max_tokens": 128000}
+        model_info, model = responses_api_bridge_check(
+            model="gpt-5-nano",
+            custom_llm_provider="openai",
+            tools=None,
+            reasoning_effort="none",
+            reasoning_summary=None,
+        )
+
+    assert model == "gpt-5-nano"
     assert model_info.get("mode") != "responses"
 
 

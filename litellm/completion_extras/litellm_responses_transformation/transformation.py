@@ -161,6 +161,50 @@ def _build_reasoning_item(
     }
 
 
+def _capture_reasoning_output_item(item: Mapping[str, object]) -> tuple[_BuiltReasoningItem, str]:
+    """The reasoning item to replay, and its readable text for a chat message.
+
+    Content text wins, then summary text. An empty string is kept: chat clients drop
+    the field only when it is missing, and a reasoning item with no readable text
+    still has to show that it was there.
+    """
+    from litellm.responses.litellm_completion_transformation.transformation import (
+        LiteLLMCompletionResponsesConfig,
+    )
+
+    item_id: Final = item.get("id")
+    encrypted_content: Final = item.get("encrypted_content")
+    summary_raw: Final = item.get("summary")
+    built: Final = _build_reasoning_item(
+        item_id=item_id if isinstance(item_id, str) else "",
+        encrypted_content=encrypted_content if isinstance(encrypted_content, str) else None,
+        summary_raw=(
+            cast("list[object]", summary_raw)  # cast-ok: untyped Responses output item json
+            if isinstance(summary_raw, list)
+            else None
+        ),
+    )
+    content_text: Final = LiteLLMCompletionResponsesConfig._reasoning_text_from_content(item)  # pyright: ignore[reportPrivateUsage]  # the Responses-side reader of reasoning content blocks
+    return built, content_text or " ".join(part["text"] for part in built["summary"] if part.get("text"))
+
+
+def _apply_pending_reasoning(
+    choice: "Choices",
+    reasoning_content: str | None,
+    pending_reasoning_item: _BuiltReasoningItem | None,
+) -> None:
+    if reasoning_content is None:
+        return
+    message = choice.message
+    if getattr(message, "reasoning_content", None) is None:
+        message.reasoning_content = reasoning_content
+    if pending_reasoning_item is not None and not getattr(message, "reasoning_items", None):
+        message.reasoning_items = cast(
+            list[ChatCompletionReasoningItem],
+            [pending_reasoning_item],
+        )
+
+
 def _reasoning_item_from_output_item(item: object) -> _BuiltReasoningItem | None:
     from openai.types.responses import ResponseReasoningItem
 
@@ -325,7 +369,8 @@ class LiteLLMResponsesTransformationHandler(CompletionTransformationBridge):
 
         item_type: Final = item.get("type")
 
-        # Ignore reasoning items for now
+        # Captured in _convert_response_output_to_choices before this callback.
+        # A direct call still drops the item rather than emitting an empty choice.
         if item_type == "reasoning":
             return None, index
 
@@ -698,12 +743,7 @@ class LiteLLMResponsesTransformationHandler(CompletionTransformationBridge):
 
         for item in output_items:
             if isinstance(item, ResponseReasoningItem):
-                pending_reasoning_item = _build_reasoning_item(
-                    item_id=item.id,
-                    encrypted_content=getattr(item, "encrypted_content", None),
-                    summary_raw=item.summary,
-                )
-                reasoning_content = " ".join(s["text"] for s in pending_reasoning_item["summary"] if s.get("text"))
+                pending_reasoning_item, reasoning_content = _capture_reasoning_output_item(item.model_dump())
 
             elif isinstance(item, ResponseOutputMessage):
                 for content in item.content:
@@ -768,8 +808,14 @@ class LiteLLMResponsesTransformationHandler(CompletionTransformationBridge):
                 # Raw dict items (e.g., from GPT-5 Codex) and pydantic items matching no
                 # openai SDK class above: typed ResponseCustomToolCall and litellm's own
                 # GenericResponseOutputItem from the completion bridge both land here
-                raw_item = item if isinstance(item, dict) else item.model_dump()
-                if raw_item.get("type") in ("function_call", "custom_tool_call"):
+                raw_item = (
+                    cast("Mapping[str, object]", item)  # cast-ok: untyped Responses output item json
+                    if isinstance(item, dict)
+                    else item.model_dump()
+                )
+                if raw_item.get("type") == "reasoning":
+                    pending_reasoning_item, reasoning_content = _capture_reasoning_output_item(raw_item)
+                elif raw_item.get("type") in ("function_call", "custom_tool_call"):
                     # Tool calls accumulate into the single trailing tool_calls choice
                     # like the typed branches above; a choice per call would hide every
                     # call after choices[0] from chat clients
@@ -778,7 +824,10 @@ class LiteLLMResponsesTransformationHandler(CompletionTransformationBridge):
                 elif handle_raw_dict_callback is not None:
                     choice, index = handle_raw_dict_callback(item=raw_item, index=index)
                     if choice is not None:
+                        _apply_pending_reasoning(choice, reasoning_content, pending_reasoning_item)
                         choices.append(choice)
+                        reasoning_content = None
+                        pending_reasoning_item = None
             else:
                 pass  # don't fail request if item in list is not supported
 
