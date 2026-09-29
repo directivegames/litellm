@@ -1075,6 +1075,12 @@ def mock_completion(
 
 
 from litellm.responses.bridge_check import (  # noqa: E402  # re-export at the old definition site
+    BRIDGE_REASONING_SUMMARY as BRIDGE_REASONING_SUMMARY,  # noqa: PLC0414  # fork: completion() reads it here
+)
+from litellm.responses.bridge_check import (  # noqa: E402  # re-export at the old definition site
+    BRIDGE_REASONING_SUMMARY_KEY as BRIDGE_REASONING_SUMMARY_KEY,  # noqa: PLC0414  # fork: completion() reads it here
+)
+from litellm.responses.bridge_check import (  # noqa: E402  # re-export at the old definition site
     _resolve_openai_api_base as _resolve_openai_api_base,  # pyright: ignore[reportPrivateUsage]  # noqa: PLC0414  # re-export of moved helper
 )
 from litellm.responses.bridge_check import (  # noqa: E402  # re-export at the old definition site
@@ -5862,6 +5868,8 @@ def completion(
             from litellm.completion_extras import responses_api_bridge
 
             optional_params, rs_val = strip_reasoning_summary_aliases_from_optional_params(optional_params)
+            if rs_val is None and BRIDGE_REASONING_SUMMARY_KEY in responses_api_model_info:
+                rs_val = BRIDGE_REASONING_SUMMARY
 
             if isinstance(reasoning_effort, dict) and "summary" in reasoning_effort:
                 optional_params["reasoning_effort"] = reasoning_effort

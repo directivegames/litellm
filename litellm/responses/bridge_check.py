@@ -39,6 +39,12 @@ def _resolve_openai_api_base(api_base: str | None) -> str:
     )
 
 
+BRIDGE_REASONING_SUMMARY_KEY: Final = "bridge_reasoning_summary"
+"""model_info key ``responses_api_bridge_check`` sets when the bridge must request
+``BRIDGE_REASONING_SUMMARY`` because the caller sent none."""
+BRIDGE_REASONING_SUMMARY: Final = "auto"
+
+
 def chat_target_accepts_reasoning_summary(model: str, custom_llm_provider: str | None) -> bool:
     try:
         local_model, provider, _, _ = get_llm_provider(model=model, custom_llm_provider=custom_llm_provider)
@@ -127,6 +133,15 @@ def responses_api_bridge_check(
     #   azure_ai gate keys on those measured boundaries instead of gpt-5.4+.
     # - Older GPT-5 names (e.g. ``gpt-5``, ``gpt-5.1``): bridge only when a reasoning
     #   summary alias is present with ``reasoning_effort`` (tools alone stay on chat).
+    # - Every gpt-5-family name: an explicit ``reasoning_effort`` other than
+    #   ``"none"``, with no tools at all, against an endpoint known to serve
+    #   /responses, is bridged. Chat Completions accepts the effort and returns
+    #   the answer with no reasoning trace, so the Responses reasoning summary is
+    #   what fills the chat message. The bridge asks for ``summary="auto"`` on this
+    #   arm (``BRIDGE_REASONING_SUMMARY_KEY``) because an unrequested summary comes
+    #   back empty. Any tool keeps its existing arm: custom tools stay on chat for
+    #   their native shape, and function tools on older names stay on chat unless a
+    #   reasoning summary is also set. ``reasoning_effort`` ``"none"`` stays on chat.
     has_function_tool: Final = any(
         (
             tool.get("type") == "function" and (isinstance(tool.get("function"), dict) or "name" in tool)
@@ -171,6 +186,9 @@ def responses_api_bridge_check(
             )
         )
     )
+    bridges_for_reasoning_trace: Final = (
+        reasoning_effort is not None and reasoning_active and not tools and on_constraint_enforcing_endpoint
+    )
     if (
         (custom_llm_provider in ("openai", "azure") or on_foundry_openai_endpoint)
         and model_info.get("mode") != "responses"
@@ -180,9 +198,12 @@ def responses_api_bridge_check(
             (reasoning_effort is not None and reasoning_summary is not None)
             or chat_rejects_function_tools
             or (carries_tool_search and on_constraint_enforcing_endpoint)
+            or (bridges_for_reasoning_trace and custom_llm_provider in ("openai", "azure"))
         )
     ):
         model_info["mode"] = "responses"
         model = model.replace("responses/", "")
+        if bridges_for_reasoning_trace:
+            model_info[BRIDGE_REASONING_SUMMARY_KEY] = BRIDGE_REASONING_SUMMARY
 
     return model_info, model
