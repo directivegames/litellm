@@ -1,6 +1,6 @@
 """BytePlus Seedance video adapter. Recorded payloads, no network."""
 
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import httpx
 import pytest
@@ -171,13 +171,50 @@ class TestBytePlusVideoTransformation:
         _url, video = _status(self.config, None, "cgt-2026-abc~plain", _job(status="running"))
         assert video.usage is None
 
-    def test_a_callers_status_check_is_not_billed(self) -> None:
+    def test_a_callers_status_check_reports_cost_at_the_plain_rate(self) -> None:
         _url, video = _status(self.config, RATES, "cgt-2026-abc", _job())
-        assert video.usage is None
+        assert video.usage == {
+            "provider_reported_cost_usd": 10.7,
+            "total_tokens": 1_000_000,
+            "video_resolution": "720p",
+            "output_cost_per_video_token_without_video_input_720p": 0.0000107,
+        }
+
+    def test_the_cost_poller_uses_the_suffix_on_the_request_video_id(self) -> None:
+        poll_id = "cgt-2026-abc~video"
+        self.config.transform_video_status_retrieve_request(
+            video_id=poll_id,
+            api_base="https://ark.ap-southeast.bytepluses.com",
+            litellm_params=GenericLiteLLMParams(model_info=RATES),
+            headers={},
+        )
+        logging_obj = Mock()
+        logging_obj.model_call_details = {}
+        video = self.config.transform_video_status_retrieve_response(
+            raw_response=_response(_job()),
+            logging_obj=logging_obj,
+            custom_llm_provider="byteplus",
+        )
+        assert video.usage is not None
+        assert video.usage["provider_reported_cost_usd"] == 6.4
 
     def test_remix_is_not_implemented(self) -> None:
         with pytest.raises(NotImplementedError):
             self.config.transform_video_remix_request("id", "prompt", "https://ark.example", GenericLiteLLMParams(), {})
+
+    @pytest.mark.asyncio
+    async def test_async_content_download_uses_sync_httpx_for_cdn(self) -> None:
+        payload = _job()
+        with patch(
+            "litellm.llms.byteplus.videos.transformation._download_signed_video_bytes",
+            return_value=b"mp4-bytes",
+        ) as download:
+            result = await self.config.async_transform_video_content_response(
+                raw_response=_response(payload),
+                logging_obj=Mock(),
+            )
+        assert result == b"mp4-bytes"
+        download.assert_called_once_with("https://cdn.example/clip.mp4")
 
 
 class TestSeedanceCompletedCost:

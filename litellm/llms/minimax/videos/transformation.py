@@ -12,6 +12,7 @@ Create does not bill. It hands the task id to the proxy's video cost poller
 seconds and image count MiniMax reports. A job that fails is not charged.
 """
 
+import asyncio
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -26,11 +27,7 @@ import litellm
 from litellm.litellm_core_utils.url_utils import encode_url_path_segment
 from litellm.llms.base_llm.chat.transformation import BaseLLMException
 from litellm.llms.base_llm.videos.transformation import BaseVideoConfig
-from litellm.llms.custom_httpx.http_handler import (
-    AsyncHTTPHandler,
-    _get_httpx_client,
-    get_async_httpx_client,
-)
+from litellm.llms.custom_httpx.http_handler import _get_httpx_client
 from litellm.secret_managers.main import get_secret_str
 from litellm.types.router import GenericLiteLLMParams
 from litellm.types.videos.main import VideoCreateOptionalRequestParams, VideoObject
@@ -385,9 +382,7 @@ class MinimaxVideoConfig(BaseVideoConfig):
         video_url = _download_url(raw_response.json())
         if video_url is None:
             raise ValueError("MiniMax video file is not ready.")
-        downloaded = _get_httpx_client().get(video_url)
-        downloaded.raise_for_status()
-        return downloaded.content
+        return _download_signed_video_bytes(video_url)
 
     async def async_transform_video_content_response(
         self,
@@ -397,10 +392,7 @@ class MinimaxVideoConfig(BaseVideoConfig):
         video_url = _download_url(raw_response.json())
         if video_url is None:
             raise ValueError("MiniMax video file is not ready.")
-        client: Final[AsyncHTTPHandler] = get_async_httpx_client(llm_provider=litellm.LlmProviders.MINIMAX)
-        downloaded = await client.get(video_url)
-        downloaded.raise_for_status()
-        return downloaded.content
+        return await asyncio.to_thread(_download_signed_video_bytes, video_url)
 
     def transform_video_remix_request(self, video_id, prompt, api_base, litellm_params, headers, extra_body=None):
         raise NotImplementedError("Video remix is not supported for MiniMax")
@@ -443,3 +435,9 @@ def _download_url(payload: object) -> str | None:
     if not isinstance(content, dict):
         return None
     return _https_url(content.get("url"))
+
+
+def _download_signed_video_bytes(video_url: str) -> bytes:
+    downloaded = _get_httpx_client().get(video_url)
+    downloaded.raise_for_status()
+    return downloaded.content
