@@ -11,10 +11,13 @@ rate is not set.
 
 Create does not bill. The class is suffixed onto the task id handed to the
 proxy's video cost poller (VIDEO_COST_POLL_ID_KEY), and stripped on the way
-back to BytePlus. The caller's video id carries no class: a caller could edit
-it, so a status check the caller makes is never what bills the job.
+back to BytePlus. The caller's video id carries no class; status responses
+price at the plain rate unless the request id carries a ~plain or ~video
+suffix (as the background cost poller does). Spend is still billed from the
+server-stored poll id, not from what the caller polls.
 """
 
+import asyncio
 import math
 from collections.abc import Mapping
 from decimal import Decimal
@@ -28,11 +31,7 @@ import litellm
 from litellm.litellm_core_utils.url_utils import encode_url_path_segment
 from litellm.llms.base_llm.chat.transformation import BaseLLMException
 from litellm.llms.base_llm.videos.transformation import BaseVideoConfig
-from litellm.llms.custom_httpx.http_handler import (
-    AsyncHTTPHandler,
-    _get_httpx_client,
-    get_async_httpx_client,
-)
+from litellm.llms.custom_httpx.http_handler import _get_httpx_client
 from litellm.secret_managers.main import get_secret_str
 from litellm.types.router import GenericLiteLLMParams
 from litellm.types.videos.main import VideoCreateOptionalRequestParams, VideoObject
@@ -225,12 +224,29 @@ def _requested_video_id(logging_obj: object) -> str:
     return ""
 
 
+def _status_request_video_id(logging_obj: object, status_video_id: str) -> str:
+    """The video id from the status HTTP call, preferring what the handler logged."""
+    requested = _requested_video_id(logging_obj)
+    if requested:
+        return requested
+    return status_video_id
+
+
+def _pricing_input_kind(logging_obj: object, status_video_id: str) -> str:
+    """plain or video for token pricing. Callers without a class suffix use plain."""
+    _, kind = split_rate_class(extract_original_video_id(_status_request_video_id(logging_obj, status_video_id)))
+    if kind in RATE_KEYS:
+        return kind
+    return "plain"
+
+
 class BytePlusVideoConfig(BaseVideoConfig):
     def __init__(self) -> None:
         super().__init__()
         # The status response hook gets no litellm_params, so the status request
         # keeps the deployment's model_info for pricing. One instance per call.
         self._model_info: Mapping[str, object] = {}
+        self._status_video_id: str = ""
 
     def get_supported_openai_params(self, model: str) -> list:
         return ["model", "prompt", *_OPTIONAL_PARAMS]
@@ -333,6 +349,7 @@ class BytePlusVideoConfig(BaseVideoConfig):
         headers: dict,
     ) -> tuple[str, dict]:
         self._model_info = _deployment_model_info(litellm_params)
+        self._status_video_id = video_id
         task_id, _kind = split_rate_class(extract_original_video_id(video_id))
         encoded: Final = encode_url_path_segment(task_id, field_name="video_id")
         return f"{_api_root(api_base)}{_TASKS_PATH}/{encoded}", {}
@@ -357,15 +374,17 @@ class BytePlusVideoConfig(BaseVideoConfig):
                 message="BytePlus video status did not include a task id",
                 headers=raw_response.headers,
             )
-        _task_id, kind = split_rate_class(extract_original_video_id(_requested_video_id(logging_obj)))
+        request_video_id = _status_request_video_id(logging_obj, self._status_video_id)
+        _task_id, kind = split_rate_class(extract_original_video_id(request_video_id))
+        pricing_kind = _pricing_input_kind(logging_obj, self._status_video_id)
         stored_id = attach_rate_class(job_id, kind) if kind is not None else job_id
         model = payload.get("model") if isinstance(payload.get("model"), str) else None
         video = VideoObject(id=stored_id, object="video", status=_map_status(payload.get("status")), created_at=0)
         if model is not None:
             video.model = model
-        cost = seedance_completed_cost(payload, kind, self._model_info)
-        if cost is not None and kind is not None:
-            video.usage = _seedance_billed_usage(payload, kind, self._model_info, cost)
+        cost = seedance_completed_cost(payload, pricing_kind, self._model_info)
+        if cost is not None:
+            video.usage = _seedance_billed_usage(payload, pricing_kind, self._model_info, cost)
         _copy_completed_at(video, payload.get("completed_at"))
         if custom_llm_provider:
             video.id = encode_video_id_with_provider(stored_id, custom_llm_provider, model)
@@ -385,9 +404,7 @@ class BytePlusVideoConfig(BaseVideoConfig):
         video_url = _download_url(raw_response.json())
         if video_url is None:
             raise ValueError("BytePlus video file is not ready.")
-        downloaded = _get_httpx_client().get(video_url)
-        downloaded.raise_for_status()
-        return downloaded.content
+        return _download_signed_video_bytes(video_url)
 
     async def async_transform_video_content_response(
         self,
@@ -397,10 +414,7 @@ class BytePlusVideoConfig(BaseVideoConfig):
         video_url = _download_url(raw_response.json())
         if video_url is None:
             raise ValueError("BytePlus video file is not ready.")
-        client: Final[AsyncHTTPHandler] = get_async_httpx_client(llm_provider=litellm.LlmProviders.BYTEPLUS)
-        downloaded = await client.get(video_url)
-        downloaded.raise_for_status()
-        return downloaded.content
+        return await asyncio.to_thread(_download_signed_video_bytes, video_url)
 
     def transform_video_remix_request(self, video_id, prompt, api_base, litellm_params, headers, extra_body=None):
         raise NotImplementedError("Video remix is not supported for BytePlus")
@@ -433,3 +447,15 @@ def _download_url(payload: object) -> str | None:
     if not isinstance(content, dict):
         return None
     return _https_url(content.get("video_url"))
+
+
+def _download_signed_video_bytes(video_url: str) -> bytes:
+    """Fetch a provider-signed CDN URL with the sync httpx client.
+
+    TOS/CDN responses can carry non-ASCII header values (for example
+    ``x-tos-expiration``). LiteLLM's default async aiohttp transport forwards
+    those into ``httpx.Response`` and httpx rejects them; the sync client does not.
+    """
+    downloaded = _get_httpx_client().get(video_url)
+    downloaded.raise_for_status()
+    return downloaded.content
