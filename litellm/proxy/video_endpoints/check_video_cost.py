@@ -278,9 +278,15 @@ class CheckVideoCost:
         llm_router: "Router",
         alerts: VideoCostAlerts,
     ) -> None:
-        self.jobs: Final = _video_jobs(prisma_client)
+        self.prisma_client: Final = prisma_client
         self.llm_router: Final = llm_router
         self.alerts: Final = alerts
+
+    @property
+    def jobs(self) -> _VideoJobTable:
+        # Proxy startup tests stand in a client with no db attribute. The table
+        # is only needed when a billing cycle runs.
+        return _video_jobs(self.prisma_client)
 
     async def check_video_cost(self) -> None:
         try:
