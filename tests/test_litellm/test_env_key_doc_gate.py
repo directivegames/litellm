@@ -175,6 +175,21 @@ def test_a_key_documented_only_on_a_provider_page_satisfies_the_gate(tmp_path: P
     assert gate.undocumented_env_keys(source_dir, docs_dir) == frozenset()
 
 
+def test_a_key_documented_only_in_an_extra_docs_dir_satisfies_the_gate(tmp_path: Path) -> None:
+    source_dir, docs_dir = _write_tree(
+        tmp_path,
+        'api_key = get_secret_str("QSTASH_ALPHA")\n',
+        "# Qstash\n\nThis provider needs an API key.\n",
+    )
+    extra_dir = tmp_path / "fork-docs"
+    extra_dir.mkdir()
+    (extra_dir / "environment-variables.md").write_text(
+        "| QSTASH_ALPHA | endpoint for this provider |\n",
+        encoding="utf-8",
+    )
+    assert gate.undocumented_env_keys(source_dir, docs_dir, (str(extra_dir),)) == frozenset()
+
+
 def test_a_key_documented_on_no_page_at_all_fails_the_gate(tmp_path: Path) -> None:
     source_dir, docs_dir = _write_tree(
         tmp_path,
