@@ -457,6 +457,13 @@
         "interactions": true
       }
     },
+    "byteplus": {
+      "display_name": "BytePlus ModelArk (`byteplus`)",
+      "url": "https://docs.byteplus.com/en/docs/ModelArk",
+      "endpoints": {
+        "video_generations": true
+      }
+    },
     "cerebras": {
       "display_name": "Cerebras (`cerebras`)",
       "url": "https://docs.litellm.ai/docs/providers/cerebras",
