@@ -15,6 +15,9 @@ ENV_KEY_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 DOCS_BASE = "./docs/my-website/docs"
 REFERENCE_TABLE_PATH = f"{DOCS_BASE}/proxy/config_settings.md"
+# The docs checkout is BerriAI/litellm-docs. Fork settings, and names this tree
+# reads that the checkout has not documented yet, live here.
+FORK_DOCS_BASE = "./docs/fork"
 DOCS_SUFFIXES = (".md", ".mdx")
 DOCUMENTED_KEY_PATTERN = re.compile(r"\b[A-Z][A-Z0-9_]*\b")
 
@@ -116,22 +119,29 @@ def collect_documented_keys(docs_dir: str) -> frozenset[str]:
     )
 
 
-def undocumented_env_keys(base_dir: str, docs_dir: str) -> frozenset[str]:
-    """Return the env vars read under ``base_dir`` that no page under ``docs_dir`` mentions."""
-    return collect_env_keys(base_dir) - collect_documented_keys(docs_dir)
+def undocumented_env_keys(
+    base_dir: str, docs_dir: str, extra_docs_dirs: tuple[str, ...] = ()
+) -> frozenset[str]:
+    """Return the env vars read under ``base_dir`` that no page under the docs dirs mentions."""
+    documented: frozenset[str] = collect_documented_keys(docs_dir).union(
+        *(collect_documented_keys(extra_dir) for extra_dir in extra_docs_dirs)
+    )
+    return collect_env_keys(base_dir) - documented
 
 
 def main() -> None:
     if not os.path.isdir(DOCS_BASE):
         raise Exception(f"No documentation found at {DOCS_BASE}; check out BerriAI/litellm-docs into docs/my-website")
 
-    undocumented_keys = undocumented_env_keys(repo_base, DOCS_BASE)
+    extra_docs_dirs: tuple[str, ...] = (FORK_DOCS_BASE,) if os.path.isdir(FORK_DOCS_BASE) else ()
+    undocumented_keys = undocumented_env_keys(repo_base, DOCS_BASE, extra_docs_dirs)
     if undocumented_keys:
         raise Exception(
             f"Environment variables read under {repo_base} but mentioned nowhere in the docs: "
             f"{sorted(undocumented_keys)}"
-            f"\nDocument each one, either on the relevant provider page or as a row in the "
-            f"'environment variables - Reference' table in {REFERENCE_TABLE_PATH}"
+            f"\nDocument each one, either on the relevant provider page, as a row in the "
+            f"'environment variables - Reference' table in {REFERENCE_TABLE_PATH}, "
+            f"or on a page under {FORK_DOCS_BASE}"
         )
     print(f"Every environment variable read under {repo_base} is documented")
 
