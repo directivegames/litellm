@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - "litellm_**"
+      - "directive/**"
   schedule:
     - cron: "23 6 * * *"
   workflow_dispatch:

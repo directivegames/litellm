@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+      - "directive/**"
 
 permissions:
   contents: read

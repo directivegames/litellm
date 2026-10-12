@@ -5,6 +5,7 @@ on: # zizmor: ignore[dangerous-triggers] runs the base branch's code only; the P
     branches:
       - main
       - "litellm_**"
+      - "directive/**"
 
 permissions:
   contents: read

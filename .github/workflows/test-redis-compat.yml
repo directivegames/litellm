@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - "litellm_**"
+      - "directive/**"
     paths:
       - "litellm/_redis.py"
       - "litellm/_redis_credential_provider.py"

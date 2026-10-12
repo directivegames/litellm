@@ -2,11 +2,12 @@ name: GitHub Actions Security Analysis
 
 on:
   push:
-    branches: [main]
+    branches: [main, "directive/**"]
   pull_request:
     branches:
       - main
       - "litellm_**"
+      - "directive/**"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
