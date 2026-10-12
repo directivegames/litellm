@@ -1,6 +1,6 @@
 name: Publish basedpyright base counts
 
-# Every commit on main or litellm_internal_staging can become a future merge-base.
+# Every commit on main, litellm_internal_staging, or directive/** can become a future merge-base.
 # Publishing its per-rule basedpyright counts as an artifact lets
 # scripts/type_check_gate.py download them in seconds instead of paying a
 # 60-110s second basedpyright pass on every fresh worktree or moved merge-base.
@@ -12,6 +12,7 @@ on:
     branches:
       - main
       - litellm_internal_staging
+      - "directive/**"
   workflow_dispatch:
     inputs:
       ref:

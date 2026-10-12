@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - litellm_internal_staging
+      - "directive/**"
     paths:
       - "litellm/**"
       - "tests/benchmarks/**"
@@ -17,6 +18,7 @@ on:
     branches:
       - main
       - litellm_internal_staging
+      - "directive/**"
     paths:
       - "litellm/**"
       - "tests/benchmarks/**"

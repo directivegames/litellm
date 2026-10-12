@@ -7,6 +7,7 @@ on:
       - litellm_internal_staging
       - litellm_oss_staging
       - "litellm_**"
+      - "directive/**"
   schedule:
     - cron: "23 6 * * *"
   workflow_dispatch:

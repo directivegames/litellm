@@ -10,6 +10,7 @@ on:
       - litellm_internal_staging
       - litellm_oss_staging
       - "litellm_**"
+      - "directive/**"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
