@@ -83,6 +83,7 @@ jobs:
             artifact-name: integrations
             test-path: >-
               tests/test_litellm/integrations
+              tests/test_litellm/llms
               tests/test_litellm/tracing
             unit-flag: integrations
             workers: 2
