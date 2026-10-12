@@ -2,7 +2,7 @@ name: Issue label sync
 
 on:
   push:
-    branches: [main]
+    branches: [main, "directive/**"]
     paths:
       - .github/issue-labels.json
       - scripts/sync-issue-labels.ts

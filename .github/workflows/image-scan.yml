@@ -6,6 +6,7 @@ on:
       - main
       - litellm_oss_branch
       - "litellm_**"
+      - "directive/**"
     paths:
       - Dockerfile
       - docker/Dockerfile.non_root

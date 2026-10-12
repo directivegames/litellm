@@ -7,12 +7,14 @@ on:
     branches:
       - main
       - "litellm_**"
+      - "directive/**"
     paths:
       - "vscode-extension/**"
       - ".github/workflows/test-vscode-extension.yml"
   push:
     branches:
       - main
+      - "directive/**"
     paths:
       - "vscode-extension/**"
       - ".github/workflows/test-vscode-extension.yml"
