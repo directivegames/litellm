@@ -86,6 +86,29 @@ class TestMinimaxVideoTransformation:
         with pytest.raises(ValueError, match="free_input_image_count"):
             _create(self.config, None)
 
+    def test_create_accepts_rates_on_litellm_params_when_nested_model_info_is_partial(self) -> None:
+        """Proxy model update keeps video rates on litellm_params, not persisted model_info."""
+        litellm_params = GenericLiteLLMParams(
+            model="MiniMax-H3",
+            output_cost_per_second_768p=0.08,
+            output_cost_per_second_2k=0.13,
+            input_cost_per_video_per_second_768p=0.08,
+            input_cost_per_video_per_second_2k=0.13,
+            input_cost_per_image=0.04,
+            free_input_image_count=5,
+            model_info={"free_input_image_count": 5},
+        )
+        data, _files, url = self.config.transform_video_create_request(
+            model="MiniMax-H3",
+            prompt="a red boat",
+            api_base="https://api.minimax.io",
+            video_create_optional_request_params={"duration": 5, "resolution": "768P", "ratio": "16:9"},
+            litellm_params=litellm_params,
+            headers={},
+        )
+        assert url.endswith("/v2/video_generation")
+        assert data["resolution"] == "768P"
+
     def test_create_fails_without_a_rate_for_the_requested_resolution(self) -> None:
         with pytest.raises(ValueError, match="output_cost_per_second_480p"):
             _create(self.config, RATES, {"duration": 5, "resolution": "480P"})
@@ -230,6 +253,10 @@ class TestMinimaxCompletedCost:
     def test_bills_whole_counts_sent_as_floats(self) -> None:
         body = _task(resolution="2K", usage={"output_seconds": 5.0, "input_seconds": 2.0, "input_image_count": 6.0})
         assert minimax_completed_cost(body, RATES) == 0.95
+
+    def test_treats_omitted_optional_usage_counts_as_zero(self) -> None:
+        body = _task(usage={"output_seconds": 5})
+        assert minimax_completed_cost(body, RATES) == 0.4
 
     @pytest.mark.parametrize(
         "count",

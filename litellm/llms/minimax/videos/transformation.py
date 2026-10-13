@@ -3,8 +3,10 @@
 Callers: ProviderConfigManager.get_provider_video_config.
 MinimaxVideoConfig, MinimaxRates, minimax_rates, minimax_completed_cost.
 
-Rates come from the deployment's model_info, keyed by output resolution in
-lower case (480p, 768p, 2k). Create refuses a job whose rates are not set.
+Rates are keyed by output resolution in lower case (480p, 768p, 2k). Operators
+set them on litellm_params; proxy update strips them from persisted model_info.
+deployment_pricing_model_info merges both for create and billing. Create
+refuses a job whose rates are not set.
 Only generation tasks are priced: this adapter creates no other task type.
 
 Create does not bill. It hands the task id to the proxy's video cost poller
@@ -26,6 +28,7 @@ from httpx._types import RequestFiles
 import litellm
 from litellm.litellm_core_utils.url_utils import encode_url_path_segment
 from litellm.llms.base_llm.chat.transformation import BaseLLMException
+from litellm.llms.base_llm.videos.deployment_model_info import deployment_pricing_model_info
 from litellm.llms.base_llm.videos.transformation import BaseVideoConfig
 from litellm.llms.custom_httpx.http_handler import _get_httpx_client
 from litellm.secret_managers.main import get_secret_str
@@ -98,11 +101,7 @@ class MinimaxRates:
 
 
 def _deployment_model_info(litellm_params: GenericLiteLLMParams) -> Mapping[str, object]:
-    """The deployment's model_info, or empty when the call has none."""
-    model_info: Final = cast(  # cast-ok: declared as a bare dict
-        "Mapping[str, object] | None", litellm_params.model_info
-    )
-    return model_info if model_info is not None else {}
+    return deployment_pricing_model_info(litellm_params)
 
 
 def minimax_rates(model_info: Mapping[str, object], resolution: object) -> MinimaxRates:
@@ -135,9 +134,11 @@ def minimax_completed_cost(body: object, model_info: Mapping[str, object]) -> fl
     if not isinstance(usage, dict):
         return None
     output_seconds = _whole_number(usage.get("output_seconds"))
-    input_seconds = _whole_number(usage.get("input_seconds"))
-    images = _whole_number(usage.get("input_image_count"))
-    if output_seconds is None or input_seconds is None or images is None:
+    if output_seconds is None:
+        return None
+    input_seconds = _usage_count(usage, "input_seconds")
+    images = _usage_count(usage, "input_image_count")
+    if input_seconds is None or images is None:
         return None
     # A finished job with no rate raises rather than being served unbilled.
     rates: Final = minimax_rates(model_info, task.get("resolution"))
@@ -153,6 +154,13 @@ def _rate(model_info: Mapping[str, object], key: str) -> Decimal:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
         raise ValueError(f"MiniMax video needs model_info.{key} (dollars) on this deployment.")
     return Decimal(str(value))
+
+
+def _usage_count(usage: Mapping[str, object], key: str) -> int | None:
+    """A whole usage count; absent keys mean zero for optional input-side meters."""
+    if key not in usage:
+        return 0
+    return _whole_number(usage.get(key))
 
 
 def _whole_number(value: object) -> int | None:
@@ -183,8 +191,8 @@ def _minimax_billed_usage(body: object, model_info: Mapping[str, object], cost: 
     return {
         "provider_reported_cost_usd": cost,
         "duration_seconds": output_seconds,
-        "input_seconds": _whole_number(usage.get("input_seconds")),
-        "input_image_count": _whole_number(usage.get("input_image_count")),
+        "input_seconds": _usage_count(usage, "input_seconds"),
+        "input_image_count": _usage_count(usage, "input_image_count"),
         "video_resolution": resolution.strip().lower() if isinstance(resolution, str) else None,
         "output_cost_per_second": float(rates.output_per_second),
         "input_cost_per_video_per_second": float(rates.input_video_per_second),

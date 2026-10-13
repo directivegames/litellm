@@ -6,8 +6,9 @@ attach_rate_class, split_rate_class.
 
 The finished task reports tokens, not whether the create body included video.
 The per-token rate depends on that class and on the output resolution, and
-comes from the deployment's model_info (RATE_KEYS). Create refuses a job whose
-rate is not set.
+comes from RATE_KEYS on the deployment. Operators set rates on litellm_params;
+proxy update strips them from persisted model_info. deployment_pricing_model_info
+merges both. Create refuses a job whose rate is not set.
 
 Create does not bill. The class is suffixed onto the task id handed to the
 proxy's video cost poller (VIDEO_COST_POLL_ID_KEY), and stripped on the way
@@ -30,6 +31,7 @@ from httpx._types import RequestFiles
 import litellm
 from litellm.litellm_core_utils.url_utils import encode_url_path_segment
 from litellm.llms.base_llm.chat.transformation import BaseLLMException
+from litellm.llms.base_llm.videos.deployment_model_info import deployment_pricing_model_info
 from litellm.llms.base_llm.videos.transformation import BaseVideoConfig
 from litellm.llms.custom_httpx.http_handler import _get_httpx_client
 from litellm.secret_managers.main import get_secret_str
@@ -117,11 +119,7 @@ def seedance_input_kind(body: object) -> str | None:
 
 
 def _deployment_model_info(litellm_params: GenericLiteLLMParams) -> Mapping[str, object]:
-    """The deployment's model_info, or empty when the call has none."""
-    model_info: Final = cast(  # cast-ok: declared as a bare dict
-        "Mapping[str, object] | None", litellm_params.model_info
-    )
-    return model_info if model_info is not None else {}
+    return deployment_pricing_model_info(litellm_params)
 
 
 def seedance_rate(model_info: Mapping[str, object], kind: str, resolution: object) -> Decimal:
