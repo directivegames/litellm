@@ -14,7 +14,8 @@ logs an error and sends a failed-tracking alert.
 
 The finish spend row's request id is the video id plus _video_cost, so it is not dropped as a
 duplicate of the create row. Its start and end are the job's lifetime, which is what the logs
-page shows as Duration.
+page shows as Duration. Its model field is the deployment wire model (litellm_params.model),
+same as the create row, not the provider status payload's model name.
 
 Callers: the /videos create endpoint (record_pending_video_job) and
 ProxyStartupEvent.initialize_scheduled_background_jobs (CheckVideoCost).
@@ -43,6 +44,7 @@ if TYPE_CHECKING:
     from litellm.proxy._types import UserAPIKeyAuth
     from litellm.proxy.utils import PrismaClient
     from litellm.router import Router
+    from litellm.types.router import Deployment, GenericLiteLLMParams
     from litellm.types.videos.main import VideoObject
 
 VIDEO_FILE_PURPOSE: Final = "video"
@@ -261,6 +263,35 @@ def _generation_times(job: _VideoJobRow, video: "VideoObject") -> tuple[datetime
     return aware, end
 
 
+def _poller_litellm_params(
+    deployment: "Deployment",
+    credentials: Mapping[str, object],
+) -> "GenericLiteLLMParams":
+    """Deployment params for a background status poll.
+
+    ``get_deployment_credentials_with_provider`` keeps only credential fields, but
+    video rates are authored on ``litellm_params``. Create already sees the full
+    deployment; the poller must match that or MiniMax jobs finish unbilled.
+    """
+    from litellm.types.router import GenericLiteLLMParams
+
+    merged: dict[str, object] = dict(deployment.litellm_params.model_dump(exclude_none=True))  # mutable-ok: pydantic input
+    merged.update(credentials)
+    merged["model"] = deployment.litellm_params.model
+    merged["model_info"] = deployment.model_info.model_dump(exclude_none=True)
+    return GenericLiteLLMParams.model_validate(MappingProxyType(merged))
+
+
+def _finish_spend_log_model(deployment: "Deployment | None", video: "VideoObject") -> str:
+    """The model name on the finish spend row matches the create row (deployment wire model)."""
+    if deployment is not None:
+        wire_model: Final = deployment.litellm_params.model
+        if isinstance(wire_model, str) and wire_model:
+            return wire_model
+    provider_model: Final = video.model
+    return provider_model if isinstance(provider_model, str) else ""
+
+
 def _reported_cost(video: "VideoObject") -> float | None:
     usage: Final[object] = video.usage
     if not isinstance(usage, Mapping):
@@ -409,7 +440,6 @@ class CheckVideoCost:
         bills nothing, so the poller calls the status handler with a logging object nobody reports.
         """
         from litellm.main import base_llm_http_handler
-        from litellm.types.router import GenericLiteLLMParams
 
         deployment: Final = self.llm_router.get_deployment(model_id=record.model_id)
         credentials: Final = self.llm_router.get_deployment_credentials_with_provider(record.model_id)
@@ -420,9 +450,7 @@ class CheckVideoCost:
                 record.poll_video_id,
             )
             return None
-        litellm_params: Final = GenericLiteLLMParams.model_validate(
-            MappingProxyType({**credentials, "model_info": deployment.model_info.model_dump(exclude_none=True)})
-        )
+        litellm_params: Final = _poller_litellm_params(deployment, credentials)
         api_key: Final = credentials.get("api_key")
         return await base_llm_http_handler.async_video_status_handler(  # pyright: ignore[reportUnknownMemberType]  # its litellm_params and logging_obj are untyped
             video_id=record.poll_video_id,
@@ -453,7 +481,7 @@ class CheckVideoCost:
             "proxy_server_request": request,
             "metadata": metadata,
         }
-        model: Final = video.model or (deployment.litellm_params.model if deployment is not None else "")
+        model: Final = _finish_spend_log_model(deployment, video)
         logging_obj: Final = _logging_obj(model, "<video_cost_poll>", params, record.custom_llm_provider)
         start_time, end_time = _generation_times(job, video)
         await logging_obj.async_success_handler(result=billed, start_time=start_time, end_time=end_time)

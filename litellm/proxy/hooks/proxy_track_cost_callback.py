@@ -24,6 +24,7 @@ from litellm.litellm_core_utils.core_helpers import (
     get_metadata_variable_name_from_kwargs,
     get_parent_otel_span_from_kwargs,
 )
+from litellm.litellm_core_utils.internal_call_metadata import is_unbilled_non_inference_call_from_params
 from litellm.litellm_core_utils.litellm_logging import StandardLoggingPayloadSetup
 from litellm.litellm_core_utils.llm_cost_calc.guardrail_cost import guardrail_information_cost
 from litellm.llms.azure.ptu_capacity import is_str_keyed_mapping
@@ -157,6 +158,15 @@ def _failure_snapshot_with_guardrails_recorded_after_it(
     return {**failure_snapshot, "guardrail_information": recorded_guardrail_information}
 def _is_video_cost_poll(metadata: Mapping[str, object]) -> bool:
     return metadata.get(INTERNAL_CALL_ORIGIN_METADATA_KEY) == BACKGROUND_VIDEO_COST_POLL_CALL_ORIGIN
+
+
+def _is_zero_response_cost(response_cost: object) -> bool:
+    if response_cost is None:
+        return True
+    try:
+        return float(response_cost) == 0.0
+    except (TypeError, ValueError):
+        return False
 
 
 def _proxy_spend_writer() -> DBSpendUpdateWriter:
@@ -583,6 +593,21 @@ class _ProxyDBLogger(CustomLogger):
                 if litellm.apply_search_free_tier and sl_object is not None and priced_cost is not None
                 else priced_cost
             )
+            if (
+                not video_cost_poll
+                and is_unbilled_non_inference_call_from_params(
+                    kwargs.get("call_type"),
+                    litellm_params,
+                    completion_response,
+                )
+                and _is_zero_response_cost(response_cost)
+            ):
+                await _release_budget_reservation(budget_reservation=budget_reservation)
+                verbose_proxy_logger.debug(
+                    "Cost tracking - skipping spend log for unbilled call_type=%s",
+                    kwargs.get("call_type"),
+                )
+                return
             tags: Final = _get_request_tags_for_cost_tracking(
                 sl_object=sl_object,
                 metadata=metadata,

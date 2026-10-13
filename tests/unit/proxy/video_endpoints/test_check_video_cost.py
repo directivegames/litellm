@@ -70,11 +70,25 @@ INPUT_VIDEO = {"type": "video_url", "video_url": {"url": "https://cdn.example/in
 
 def _minimax_task(status: str = "succeeded", input_seconds: int = 0) -> dict:
     usage = {"output_seconds": 5, "input_seconds": input_seconds, "input_image_count": 0}
-    return {"task": {"id": "mm-task", "status": status, "resolution": "768P", "usage": usage}}
+    return {
+        "task": {
+            "id": "mm-task",
+            "status": status,
+            "resolution": "768P",
+            "usage": usage,
+            "model": "MiniMax-H3",
+        }
+    }
 
 
 def _byteplus_task(status: str = "succeeded") -> dict:
-    return {"id": "cgt-1", "status": status, "resolution": "720p", "usage": {"total_tokens": 100_000}}
+    return {
+        "id": "cgt-1",
+        "status": status,
+        "resolution": "720p",
+        "usage": {"total_tokens": 100_000},
+        "model": "dreamina-seedance-2-5-260628",
+    }
 
 
 class FakeProviders:
@@ -295,13 +309,17 @@ class TestBilledWhenTheJobFinishes:
         stack.table.rows[0].created_at = started
         await stack.poll(cycles=2)
 
-        assert [kwargs["response_cost"] for kwargs, _ in stack.spend.create_charges()] == [0.0]
+        create_kwargs, _created = stack.spend.create_charges()[0]
+        assert create_kwargs["response_cost"] == 0.0
         charges = stack.spend.poll_charges()
         assert len(charges) == 1
         kwargs, billed = charges[0]
         assert kwargs["response_cost"] == pytest.approx(cost)
         assert kwargs["standard_logging_object"]["response_cost"] == pytest.approx(cost)
         logged = kwargs["standard_logging_object"]
+        create_logged = create_kwargs.get("standard_logging_object")
+        if isinstance(create_logged, dict):
+            assert logged["model"] == create_logged["model"]
         assert logged["endTime"] - logged["startTime"] == pytest.approx(120, abs=5)
         assert billed.usage["provider_reported_cost_usd"] == pytest.approx(cost)
         if model.startswith("minimax/"):
@@ -331,6 +349,43 @@ class TestBilledWhenTheJobFinishes:
         assert ("GET", status[0]) in stack.providers.seen
         (row,) = stack.table.rows
         assert (row.status, row.batch_processed) == ("completed", True)
+        assert stack.alerts.messages == []
+
+    @pytest.mark.asyncio
+    async def test_minimax_bills_when_rates_live_only_on_litellm_params(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(litellm, "disable_aiohttp_transport", True)
+        litellm.in_memory_llm_clients_cache.flush_cache()
+        spend = SpendCapture()
+        monkeypatch.setattr(litellm, "callbacks", [spend])
+        monkeypatch.setattr(litellm, "_async_success_callback", [spend])
+        deployments = [
+            {
+                "model_name": "minimax/hailuo-3",
+                "litellm_params": {
+                    "model": "minimax/MiniMax-H3",
+                    "api_key": "mm-key",
+                    "output_cost_per_second_768p": 0.08,
+                    "input_cost_per_video_per_second_768p": 0.08,
+                    "input_cost_per_image": 0.04,
+                    "free_input_image_count": 5,
+                },
+                "model_info": {"id": "mm-params-only", "mode": "video_generation"},
+            }
+        ]
+        stack = Stack(spend)
+        stack.router = Router(model_list=deployments)
+        with respx.mock(assert_all_called=False) as provider_http:
+            provider_http.route().mock(side_effect=stack.providers.handle)
+            stack.providers.reply("POST", MINIMAX_CREATE, {"task_id": "mm-task", "status": "queued"})
+            stack.providers.reply("GET", MINIMAX_STATUS, _minimax_task())
+            video = await stack.create("minimax/hailuo-3", duration=5, resolution="768P")
+            await stack.poll(cycles=2)
+        litellm.in_memory_llm_clients_cache.flush_cache()
+
+        charges = stack.spend.poll_charges()
+        assert len(charges) == 1
+        assert charges[0][0]["response_cost"] == pytest.approx(0.4)
+        assert charges[0][1].id == video.id
         assert stack.alerts.messages == []
 
     @pytest.mark.asyncio
