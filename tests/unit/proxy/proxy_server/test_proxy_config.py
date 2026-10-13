@@ -2795,6 +2795,27 @@ def test_ProxyConfig_get_model_info_with_id_returns_router_model_info():
     assert snapshot == {"id": "m-1", "db_model": True, "blocked": False}
 
 
+def test_ProxyConfig_get_model_info_with_id_hydrates_metadata_without_premium(monkeypatch):
+    monkeypatch.setattr("litellm.proxy.proxy_server.premium_user", False)
+    created_at: Final = datetime(2026, 3, 1, 12, 0, 0)
+    updated_at: Final = datetime(2026, 3, 2, 8, 30, 0)
+    pc = ProxyConfig()
+    model = SimpleNamespace(
+        model_id="m-2",
+        model_info={"id": "m-2"},
+        blocked=False,
+        created_at=created_at,
+        updated_at=updated_at,
+        created_by="moca-api",
+        updated_by="operator-1",
+    )
+    out = pc.get_model_info_with_id(model=model, db_model=True).model_dump(exclude_none=True)
+    assert out["created_at"] == created_at
+    assert out["updated_at"] == updated_at
+    assert out["created_by"] == "moca-api"
+    assert out["updated_by"] == "operator-1"
+
+
 PINNED_MODEL_INFO: Final = MappingProxyType(
     {
         "id": "pinned-row",
