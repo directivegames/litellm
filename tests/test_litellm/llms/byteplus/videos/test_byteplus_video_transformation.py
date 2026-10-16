@@ -137,12 +137,21 @@ class TestBytePlusVideoTransformation:
         assert split_rate_class(video._hidden_params[VIDEO_COST_POLL_ID_KEY]) == ("cgt-1", "video")
         assert video.usage in (None, {})
 
-    def test_the_callers_video_id_carries_no_input_class(self) -> None:
+    def test_the_callers_video_id_carries_the_input_class_the_poller_bills_at(self) -> None:
         video = self._created({"content": _VIDEO_CONTENT})
 
         decoded = decode_video_id_with_provider(video.id)
         assert decoded.get("custom_llm_provider") == "byteplus"
-        assert decoded.get("video_id") == "cgt-1"
+        assert decoded.get("video_id") == video._hidden_params[VIDEO_COST_POLL_ID_KEY] == "cgt-1~video"
+
+    def test_the_price_a_caller_sees_matches_the_price_billed_for_a_video_input(self) -> None:
+        created = self._created({"content": _VIDEO_CONTENT})
+        caller_id = decode_video_id_with_provider(created.id)["video_id"]
+        _url, seen_by_caller = _status(self.config, RATES, caller_id, _job())
+        _url, seen_by_poller = _status(self.config, RATES, created._hidden_params[VIDEO_COST_POLL_ID_KEY], _job())
+
+        assert seen_by_caller.usage["provider_reported_cost_usd"] == seen_by_poller.usage["provider_reported_cost_usd"]
+        assert seen_by_caller.usage["video_resolution"] == seen_by_poller.usage["video_resolution"]
 
     def test_a_text_only_create_is_polled_at_the_plain_rate(self) -> None:
         video = self._created({"content": [{"type": "text", "text": "a boat"}]})

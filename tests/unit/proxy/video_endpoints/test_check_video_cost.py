@@ -346,6 +346,8 @@ class TestBilledWhenTheJobFinishes:
         assert metadata["user_api_key_team_id"] == "team-1"
         assert metadata["tags"] == ["prod"]
         assert metadata[INTERNAL_CALL_ORIGIN_METADATA_KEY] == BACKGROUND_VIDEO_COST_POLL_CALL_ORIGIN
+        assert "status" not in metadata
+        assert "error_information" not in metadata
         assert ("GET", status[0]) in stack.providers.seen
         (row,) = stack.table.rows
         assert (row.status, row.batch_processed) == ("completed", True)
@@ -421,13 +423,19 @@ class TestBilledWhenTheJobFinishes:
     @pytest.mark.asyncio
     async def test_a_failed_job_that_reports_usage_is_billed_to_its_creator(self, stack: Stack) -> None:
         stack.providers.reply("POST", MINIMAX_CREATE, {"task_id": "mm-task", "status": "queued"})
-        stack.providers.reply("GET", MINIMAX_STATUS, _minimax_task(status="failed"))
+        failed = _minimax_task(status="failed")
+        failed["task"]["error"] = {"code": "1026", "message": "video description contains sensitive content"}
+        stack.providers.reply("GET", MINIMAX_STATUS, failed)
 
         await stack.create("minimax/hailuo-3", duration=5, resolution="768P")
         await stack.poll(cycles=2)
 
         ((kwargs, _billed),) = stack.spend.poll_charges()
         assert kwargs["response_cost"] == pytest.approx(0.4)
+        metadata = kwargs["litellm_params"]["metadata"]
+        assert metadata["status"] == "failure"
+        assert metadata["error_information"]["error_code"] == "1026"
+        assert metadata["error_information"]["error_message"] == "video description contains sensitive content"
         (row,) = stack.table.rows
         assert (row.status, row.batch_processed) == ("failed", True)
         assert stack.alerts.messages == []
