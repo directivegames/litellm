@@ -4,6 +4,7 @@ Callers: ProviderConfigManager.get_provider_video_config.
 OpenRouterVideoConfig, openrouter_completed_cost.
 
 The upstream model stays the OpenRouter catalog name, such as minimax/hailuo-3.
+Create sends image inputs as frame_images and input_references. A video item is not sent.
 Cost is the completed job's usage.cost. The finished usage keeps the provider's other
 usage fields and a top-level duration. Create does not bill; it hands the job id to
 the proxy's video cost poller (VIDEO_COST_POLL_ID_KEY), which bills the finished job.
@@ -12,7 +13,7 @@ a job started any other way would never be billed.
 """
 
 import math
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from typing import Any, Final, NoReturn
 
 import httpx
@@ -35,6 +36,8 @@ _FORWARDED: Final = (
     "generate_audio",
     "size",
 )
+# OpenRouter names a first or last frame separately from a reference image.
+_FRAME_ROLES: Final = frozenset({"first_frame", "last_frame"})
 
 
 def _length_seconds(value: object) -> float | None:
@@ -63,6 +66,75 @@ def _openrouter_billed_usage(body: object, cost: float) -> dict[str, object]:
         if length is not None:
             usage["duration_seconds"] = length
     return usage
+
+
+def _image_url(item: Mapping[str, object]) -> str | None:
+    image = item.get("image_url")
+    if not isinstance(image, dict):
+        return None
+    url = image.get("url")
+    if isinstance(url, str) and url:
+        return url
+    return None
+
+
+def _frame_role(item: Mapping[str, object]) -> str | None:
+    named = item.get("frame_type")
+    role = named if isinstance(named, str) else item.get("role")
+    if isinstance(role, str) and role.lower() in _FRAME_ROLES:
+        return role.lower()
+    return None
+
+
+def _openrouter_image(url: str, frame: str | None) -> dict[str, object]:
+    if frame is None:
+        return {"type": "image_url", "image_url": {"url": url}}
+    return {"type": "image_url", "image_url": {"url": url}, "frame_type": frame}
+
+
+def _matching_image(item: object, *, frames: bool) -> dict[str, object] | None:
+    if not isinstance(item, dict):
+        return None
+    url = _image_url(item)
+    role = _frame_role(item)
+    if url is None or (role is not None) != frames:
+        return None
+    return _openrouter_image(url, role if frames else None)
+
+
+def _matching_images(items: object, *, frames: bool) -> Iterator[dict[str, object]]:
+    if not isinstance(items, list):
+        return
+    for item in items:
+        image = _matching_image(item, frames=frames)
+        if image is not None:
+            yield image
+
+
+def _image_field(items: object, *, frames: bool) -> list[dict[str, object]]:
+    return list(_matching_images(items, frames=frames))
+
+
+def _openrouter_image_fields(params: Mapping[str, object]) -> dict[str, list[dict[str, object]]]:
+    """Images for an OpenRouter video create.
+
+    A first_frame or last_frame image is a frame. Any other image is a reference.
+    A video item is left out. frame_images or input_references already on the
+    request are sent as given, and content is not read in that case.
+    """
+    explicit_frames = params.get("frame_images")
+    explicit_refs = params.get("input_references")
+    using_content = not isinstance(explicit_frames, list) and not isinstance(explicit_refs, list)
+    frame_source = params.get("content") if using_content else explicit_frames
+    reference_source = params.get("content") if using_content else explicit_refs
+    fields: dict[str, list[dict[str, object]]] = {}
+    frames = _image_field(frame_source, frames=True)
+    references = _image_field(reference_source, frames=False)
+    if frames:
+        fields["frame_images"] = frames
+    if references:
+        fields["input_references"] = references
+    return fields
 
 
 def openrouter_completed_cost(body: object) -> float | None:
@@ -142,6 +214,7 @@ class OpenRouterVideoConfig(OpenAIVideoConfig):
             value = video_create_optional_request_params.get(key)
             if value is not None:
                 body[key] = value
+        body.update(_openrouter_image_fields(video_create_optional_request_params))
         return body, [], api_base
 
     def transform_video_create_response(

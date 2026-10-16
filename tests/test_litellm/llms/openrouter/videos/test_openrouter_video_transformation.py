@@ -51,6 +51,85 @@ class TestOpenRouterVideoTransformation:
         }
         assert self.config.use_multipart_form_data() is False
 
+    def test_create_request_sends_frame_and_reference_images_from_content(self) -> None:
+        data, files, _url = self.config.transform_video_create_request(
+            model="bytedance/seedance-2.5",
+            prompt="a red boat",
+            api_base="https://openrouter.ai/api/v1/videos",
+            video_create_optional_request_params={
+                "resolution": "720p",
+                "content": [
+                    {"type": "text", "text": "a red boat"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "https://cdn.example/first.png"},
+                        "role": "first_frame",
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "https://cdn.example/last.png"},
+                        "role": "last_frame",
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "https://cdn.example/ref.png"},
+                        "role": "reference_image",
+                    },
+                    {"type": "image_url", "image_url": {"url": "https://cdn.example/plain.png"}},
+                    {"type": "video_url", "video_url": {"url": "https://cdn.example/in.mp4"}},
+                ],
+            },
+            litellm_params=GenericLiteLLMParams(),
+            headers={},
+        )
+
+        assert files == []
+        assert data["prompt"] == "a red boat"
+        assert data["resolution"] == "720p"
+        assert data["frame_images"] == [
+            {
+                "type": "image_url",
+                "image_url": {"url": "https://cdn.example/first.png"},
+                "frame_type": "first_frame",
+            },
+            {
+                "type": "image_url",
+                "image_url": {"url": "https://cdn.example/last.png"},
+                "frame_type": "last_frame",
+            },
+        ]
+        assert data["input_references"] == [
+            {"type": "image_url", "image_url": {"url": "https://cdn.example/ref.png"}},
+            {"type": "image_url", "image_url": {"url": "https://cdn.example/plain.png"}},
+        ]
+        assert "content" not in data
+
+    def test_create_request_forwards_openrouter_image_fields(self) -> None:
+        frame: dict[str, object] = {
+            "type": "image_url",
+            "image_url": {"url": "https://cdn.example/first.png"},
+            "frame_type": "first_frame",
+        }
+        reference: dict[str, object] = {
+            "type": "image_url",
+            "image_url": {"url": "https://cdn.example/ref.png"},
+        }
+        data, _files, _url = self.config.transform_video_create_request(
+            model="minimax/hailuo-3",
+            prompt="a red boat",
+            api_base="https://openrouter.ai/api/v1/videos",
+            video_create_optional_request_params={
+                "frame_images": [frame],
+                "input_references": [reference],
+                "content": [{"type": "image_url", "image_url": {"url": "https://cdn.example/other.png"}}],
+            },
+            litellm_params=GenericLiteLLMParams(),
+            headers={},
+        )
+
+        assert data["frame_images"] == [frame]
+        assert data["input_references"] == [reference]
+
     def test_create_response_encodes_the_id_and_does_not_bill(self) -> None:
         video = self.config.transform_video_create_response(
             model="minimax/hailuo-3",
