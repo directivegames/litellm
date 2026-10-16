@@ -419,9 +419,27 @@ class TestBilledWhenTheJobFinishes:
         assert (row.status, row.batch_processed) == ("in_progress", False)
 
     @pytest.mark.asyncio
-    async def test_a_failed_job_closes_without_a_charge_or_an_alert(self, stack: Stack) -> None:
+    async def test_a_failed_job_that_reports_usage_is_billed_to_its_creator(self, stack: Stack) -> None:
         stack.providers.reply("POST", MINIMAX_CREATE, {"task_id": "mm-task", "status": "queued"})
         stack.providers.reply("GET", MINIMAX_STATUS, _minimax_task(status="failed"))
+
+        await stack.create("minimax/hailuo-3", duration=5, resolution="768P")
+        await stack.poll(cycles=2)
+
+        ((kwargs, _billed),) = stack.spend.poll_charges()
+        assert kwargs["response_cost"] == pytest.approx(0.4)
+        (row,) = stack.table.rows
+        assert (row.status, row.batch_processed) == ("failed", True)
+        assert stack.alerts.messages == []
+
+    @pytest.mark.asyncio
+    async def test_a_failed_job_that_reports_no_usage_closes_without_a_charge_or_an_alert(
+        self, stack: Stack
+    ) -> None:
+        stack.providers.reply("POST", MINIMAX_CREATE, {"task_id": "mm-task", "status": "queued"})
+        failed = _minimax_task(status="failed")
+        failed["task"]["usage"] = {}
+        stack.providers.reply("GET", MINIMAX_STATUS, failed)
 
         await stack.create("minimax/hailuo-3", duration=5, resolution="768P")
         await stack.poll(cycles=2)

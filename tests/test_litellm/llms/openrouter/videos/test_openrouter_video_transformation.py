@@ -221,6 +221,10 @@ class TestOpenRouterCompletedCost:
     def test_ignores_a_job_that_is_still_running(self) -> None:
         assert openrouter_completed_cost({"status": "pending", "usage": {"cost": 0.5}}) is None
 
+    @pytest.mark.parametrize("status", ["failed", "cancelled", "expired"])
+    def test_prices_the_cost_a_job_reports_even_if_it_did_not_complete(self, status: str) -> None:
+        assert openrouter_completed_cost({"status": status, "usage": {"cost": 0.5}}) == 0.5
+
     def test_ignores_zero_negative_and_non_numeric_costs(self) -> None:
         body = {"status": "completed", "usage": {"cost": 0}}
         assert openrouter_completed_cost(body) is None

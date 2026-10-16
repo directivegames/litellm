@@ -166,6 +166,16 @@ class TestMinimaxVideoTransformation:
         assert video.usage in (None, {})
         assert video._hidden_params[VIDEO_COST_POLL_ID_KEY] == "4240"
 
+    def test_a_failed_task_reports_the_provider_error(self) -> None:
+        provider_error = {"code": "1026", "message": "video description contains sensitive content"}
+        video = _status(self.config, RATES, _task(status="failed", error=provider_error))
+        assert video.status == "failed"
+        assert video.error == provider_error
+
+    def test_a_task_that_is_not_failed_carries_no_error(self) -> None:
+        video = _status(self.config, RATES, _task(status="running", error={"code": "x"}))
+        assert video.error is None
+
     def test_succeeded_status_reports_the_configured_cost(self) -> None:
         video = _status(self.config, RATES, _task())
 
@@ -242,6 +252,10 @@ class TestMinimaxCompletedCost:
 
     def test_ignores_a_job_that_is_still_running(self) -> None:
         assert minimax_completed_cost(_task(status="running"), RATES) is None
+
+    @pytest.mark.parametrize("status", ["failed", "cancelled"])
+    def test_prices_the_usage_a_job_reports_even_if_it_did_not_succeed(self, status: str) -> None:
+        assert minimax_completed_cost(_task(status=status), RATES) == minimax_completed_cost(_task(), RATES)
 
     def test_raises_for_a_resolution_without_a_configured_rate(self) -> None:
         with pytest.raises(ValueError, match="output_cost_per_second_1080p"):

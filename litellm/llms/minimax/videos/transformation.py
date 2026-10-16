@@ -11,7 +11,7 @@ Only generation tasks are priced: this adapter creates no other task type.
 
 Create does not bill. It hands the task id to the proxy's video cost poller
 (VIDEO_COST_POLL_ID_KEY), which bills the job once it succeeds, from the
-seconds and image count MiniMax reports. A job that fails is not charged.
+seconds and image count MiniMax reports. A job that fails is billed for whatever usage MiniMax reports.
 """
 
 import asyncio
@@ -121,11 +121,11 @@ def minimax_rates(model_info: Mapping[str, object], resolution: object) -> Minim
 
 
 def minimax_completed_cost(body: object, model_info: Mapping[str, object]) -> float | None:
-    """Dollars for a succeeded generation task at the deployment's rates, or nothing if it is not billable."""
+    """Dollars for the usage a generation task reports, whatever its status, at the deployment's rates."""
     if not isinstance(body, dict):
         return None
     task = body.get("task")
-    if not isinstance(task, dict) or task.get("status") != "succeeded":
+    if not isinstance(task, dict) or _map_status(task.get("status")) not in _FINISHED:
         return None
     # Regeneration and Context-IR are separate MiniMax APIs this adapter never calls.
     if task.get("task_type", "generation") != "generation":
@@ -207,11 +207,19 @@ def _copy_completed_at(video: VideoObject, value: object) -> None:
         video.completed_at = completed
 
 
+def _copy_failure(video: VideoObject, error: object) -> None:
+    if video.status == "failed" and isinstance(error, dict) and error:
+        video.error = {str(key): value for key, value in error.items()}
+
+
 def _api_root(api_base: str | None) -> str:
     root = (api_base or _DEFAULT_API_BASE).rstrip("/")
     if root.endswith("/v1"):
         return root[: -len("/v1")]
     return root
+
+
+_FINISHED: Final = ("completed", "failed")
 
 
 def _map_status(status: object) -> str:
@@ -371,6 +379,7 @@ class MinimaxVideoConfig(BaseVideoConfig):
                 video.seconds = str(output_seconds)
         if isinstance(task, dict):
             _copy_completed_at(video, task.get("completed_at"))
+            _copy_failure(video, task.get("error"))
         if custom_llm_provider:
             video.id = encode_video_id_with_provider(job_id, custom_llm_provider, model)
         return video
