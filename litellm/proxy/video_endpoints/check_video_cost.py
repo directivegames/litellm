@@ -472,6 +472,7 @@ class CheckVideoCost:
         }
         metadata: Final = {  # mutable-ok: the success handler writes hidden_params into this metadata
             **record.metadata,
+            **_failure_metadata(video),
             "model_info": {"id": record.model_id},  # mutable-ok: spend logs read the deployment id here
             "model_group": deployment.model_name if deployment is not None else None,
             INTERNAL_CALL_ORIGIN_METADATA_KEY: BACKGROUND_VIDEO_COST_POLL_CALL_ORIGIN,
@@ -485,6 +486,28 @@ class CheckVideoCost:
         logging_obj: Final = _logging_obj(model, "<video_cost_poll>", params, record.custom_llm_provider)
         start_time, end_time = _generation_times(job, video)
         await logging_obj.async_success_handler(result=billed, start_time=start_time, end_time=end_time)
+
+
+def _failure_metadata(video: "VideoObject") -> Mapping[str, object]:
+    """Spend-log fields that show a billed job the provider did not complete as a failure, with its reason."""
+    if video.status == "completed":
+        return MappingProxyType({})
+    error: Final[object] = video.error
+    fields: Final = error if isinstance(error, Mapping) else {}
+    code: Final[object] = cast("Mapping[str, object]", fields).get("code")  # cast-ok: provider JSON
+    message: Final[object] = cast("Mapping[str, object]", fields).get("message")  # cast-ok: provider JSON
+    return MappingProxyType(
+        {
+            "status": "failure",
+            "error_information": {
+                "error_code": str(code) if code is not None else "",
+                "error_class": f"VideoJob{video.status.capitalize()}",
+                "error_message": message if isinstance(message, str) else f"The job ended {video.status}",
+                "llm_provider": "",
+                "traceback": "",
+            },
+        }
+    )
 
 
 def _logging_obj(

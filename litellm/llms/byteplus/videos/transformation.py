@@ -12,9 +12,9 @@ merges both. Create refuses a job whose rate is not set.
 
 Create does not bill. The class is suffixed onto the task id handed to the
 proxy's video cost poller (VIDEO_COST_POLL_ID_KEY), and stripped on the way
-back to BytePlus. The caller's video id carries no class; status responses
-price at the plain rate unless the request id carries a ~plain or ~video
-suffix (as the background cost poller does). Spend is still billed from the
+back to BytePlus. The caller's video id carries the same class, so a status
+response prices at the rate the job is billed at. An id with no suffix, from
+before this change, prices at the plain rate. Spend is billed from the
 server-stored poll id, not from what the caller polls.
 """
 
@@ -340,11 +340,12 @@ class BytePlusVideoConfig(BaseVideoConfig):
             id=job_id, object="video", status=_map_status(payload.get("status", "queued")), created_at=0
         )
         video.model = model
-        if custom_llm_provider:
-            video.id = encode_video_id_with_provider(job_id, custom_llm_provider, model)
         # Matches the class create priced the gate with.
         kind: Final = seedance_input_kind(request_data) or "plain"
-        video._hidden_params[VIDEO_COST_POLL_ID_KEY] = attach_rate_class(job_id, kind)  # pyright: ignore[reportPrivateUsage]  # the proxy reads adapter facts here
+        classed_id: Final = attach_rate_class(job_id, kind)
+        if custom_llm_provider:
+            video.id = encode_video_id_with_provider(classed_id, custom_llm_provider, model)
+        video._hidden_params[VIDEO_COST_POLL_ID_KEY] = classed_id  # pyright: ignore[reportPrivateUsage]  # the proxy reads adapter facts here
         return video
 
     def transform_video_status_retrieve_request(
