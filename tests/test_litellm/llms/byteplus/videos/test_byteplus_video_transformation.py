@@ -198,6 +198,16 @@ class TestBytePlusVideoTransformation:
         assert video.usage is not None
         assert video.usage["provider_reported_cost_usd"] == 6.4
 
+    def test_a_failed_task_reports_the_provider_error(self) -> None:
+        provider_error = {"code": "InvalidParameter", "message": "the reference video could not be read"}
+        _url, video = _status(self.config, RATES, "cgt-2026-abc", _job(status="failed", error=provider_error))
+        assert video.status == "failed"
+        assert video.error == provider_error
+
+    def test_a_task_that_is_not_failed_carries_no_error(self) -> None:
+        _url, video = _status(self.config, RATES, "cgt-2026-abc", _job(status="running", error={"code": "x"}))
+        assert video.error is None
+
     def test_remix_is_not_implemented(self) -> None:
         with pytest.raises(NotImplementedError):
             self.config.transform_video_remix_request("id", "prompt", "https://ark.example", GenericLiteLLMParams(), {})
@@ -237,6 +247,12 @@ class TestSeedanceCompletedCost:
 
     def test_ignores_a_job_that_is_still_running(self) -> None:
         assert seedance_completed_cost(_job(status="running"), "plain", RATES) is None
+
+    @pytest.mark.parametrize("status", ["failed", "cancelled", "expired"])
+    def test_prices_the_tokens_a_job_reports_even_if_it_did_not_succeed(self, status: str) -> None:
+        assert seedance_completed_cost(_job(status=status), "plain", RATES) == seedance_completed_cost(
+            _job(), "plain", RATES
+        )
 
     def test_bills_a_whole_token_count_sent_as_a_float(self) -> None:
         assert seedance_completed_cost(_job(usage={"total_tokens": 1_000_000.0}), "plain", RATES) == 10.7

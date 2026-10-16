@@ -135,8 +135,8 @@ def seedance_rate(model_info: Mapping[str, object], kind: str, resolution: objec
 
 
 def seedance_completed_cost(body: object, kind: str | None, model_info: Mapping[str, object]) -> float | None:
-    """Dollars for a succeeded Seedance task at the deployment's rate for its input class and resolution."""
-    if kind not in RATE_KEYS or not isinstance(body, dict) or body.get("status") != "succeeded":
+    """Dollars for the tokens a Seedance task reports, whatever its status, at the deployment's rate for its input class and resolution."""
+    if kind not in RATE_KEYS or not isinstance(body, dict) or _map_status(body.get("status")) not in _FINISHED:
         return None
     usage = body.get("usage")
     if not isinstance(usage, dict):
@@ -176,6 +176,11 @@ def _copy_completed_at(video: VideoObject, value: object) -> None:
         video.completed_at = completed
 
 
+def _copy_failure(video: VideoObject, error: object) -> None:
+    if video.status == "failed" and isinstance(error, dict) and error:
+        video.error = {str(key): value for key, value in error.items()}
+
+
 def _whole_number(value: object) -> int | None:
     # bool is an int subclass; a true/false count is not usage. A JSON count may arrive as 5.0,
     # and refusing it would leave a finished job unbilled. is_integer() is False for nan and inf.
@@ -195,6 +200,9 @@ def _is_video_item(item: dict[str, Any]) -> bool:
 
 def _api_root(api_base: str | None) -> str:
     return (api_base or _DEFAULT_API_BASE).rstrip("/")
+
+
+_FINISHED: Final = ("completed", "failed")
 
 
 def _map_status(status: object) -> str:
@@ -384,6 +392,7 @@ class BytePlusVideoConfig(BaseVideoConfig):
         if cost is not None:
             video.usage = _seedance_billed_usage(payload, pricing_kind, self._model_info, cost)
         _copy_completed_at(video, payload.get("completed_at"))
+        _copy_failure(video, payload.get("error"))
         if custom_llm_provider:
             video.id = encode_video_id_with_provider(stored_id, custom_llm_provider, model)
         return video

@@ -137,9 +137,12 @@ def _openrouter_image_fields(params: Mapping[str, object]) -> dict[str, list[dic
     return fields
 
 
+_FINISHED: Final = frozenset({"completed", "failed", "cancelled", "expired"})
+
+
 def openrouter_completed_cost(body: object) -> float | None:
-    """Dollars from a finished OpenRouter video job, or nothing if it is not billable."""
-    if not isinstance(body, dict) or body.get("status") != "completed":
+    """Dollars OpenRouter reports for a video job, whatever its status."""
+    if not isinstance(body, dict) or body.get("status") not in _FINISHED:
         return None
     usage = body.get("usage")
     if not isinstance(usage, dict):
