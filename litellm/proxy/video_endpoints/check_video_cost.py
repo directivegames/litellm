@@ -36,7 +36,12 @@ from litellm.constants import (
     MAX_OBJECTS_PER_POLL_CYCLE,
 )
 from litellm.types.utils import BACKGROUND_VIDEO_COST_POLL_CALL_ORIGIN
-from litellm.types.videos.utils import VIDEO_COST_POLL_ID_KEY, decode_video_id_with_provider
+from litellm.types.videos.utils import (
+    PROVIDER_RESPONSE_KEY,
+    PROVIDER_TASK_ID_KEY,
+    VIDEO_COST_POLL_ID_KEY,
+    decode_video_id_with_provider,
+)
 
 if TYPE_CHECKING:
     from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLogging
@@ -464,14 +469,22 @@ class CheckVideoCost:
     async def _bill(self, job: _VideoJobRow, record: PollRecord, video: "VideoObject", cost: float) -> None:
         deployment: Final = self.llm_router.get_deployment(model_id=record.model_id)
         # The spend row names the video the caller holds, not the provider's task id.
-        billed: Final = video.model_copy(update=MappingProxyType({"id": job.unified_object_id}))
+        # The provider's whole answer rides in usage because spend logs keep usage extras
+        # (additional_usage_values) even with prompt and response storage off. The caller's
+        # own copy of the video never carries it.
+        provider_response: Final[object] = video._hidden_params.get(PROVIDER_RESPONSE_KEY)  # pyright: ignore[reportPrivateUsage]
+        billed_usage: Final = {**(video.usage or {}), PROVIDER_RESPONSE_KEY: provider_response}
+        billed: Final = video.model_copy(update=MappingProxyType({"id": job.unified_object_id, "usage": billed_usage}))
         billed._hidden_params = {  # pyright: ignore[reportPrivateUsage]  # logging reads the cost here  # mutable-ok: logging writes into it
             **video._hidden_params,  # pyright: ignore[reportPrivateUsage]  # the adapter's facts carry over
             "response_cost": cost,
             "model_id": record.model_id,
         }
+        task_id: Final[object] = video._hidden_params.get(PROVIDER_TASK_ID_KEY)  # pyright: ignore[reportPrivateUsage]
         metadata: Final = {  # mutable-ok: the success handler writes hidden_params into this metadata
             **record.metadata,
+            # The one free-form key spend logs keep, so the dashboard shows the provider's task id.
+            "spend_logs_metadata": {PROVIDER_TASK_ID_KEY: task_id},
             **_failure_metadata(video),
             "model_info": {"id": record.model_id},  # mutable-ok: spend logs read the deployment id here
             "model_group": deployment.model_name if deployment is not None else None,

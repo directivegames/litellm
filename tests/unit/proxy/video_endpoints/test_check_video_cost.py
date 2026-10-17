@@ -339,7 +339,7 @@ class TestBilledWhenTheJobFinishes:
             )
             assert billed.usage[rate_key] == pytest.approx(0.0000107 if "content" not in params else 0.0000064)
         else:
-            assert set(billed.usage) == {"provider_reported_cost_usd"}
+            assert set(billed.usage) == {"provider_reported_cost_usd", "provider_response"}
         assert billed.id == video.id
         metadata = kwargs["litellm_params"]["metadata"]
         assert metadata["user_api_key"] == "hashed-key"
@@ -439,6 +439,41 @@ class TestBilledWhenTheJobFinishes:
         (row,) = stack.table.rows
         assert (row.status, row.batch_processed) == ("failed", True)
         assert stack.alerts.messages == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("model", "params", "create", "status", "cost"), PROVIDER_CASES)
+    async def test_the_finish_log_carries_the_providers_whole_answer(
+        self, stack: Stack, model: str, params: dict, create: tuple, status: tuple, cost: float
+    ) -> None:
+        stack.providers.reply("POST", *create)
+        stack.providers.reply("GET", *status)
+
+        await stack.create(model, **params)
+        await stack.poll(cycles=2)
+
+        ((kwargs, billed),) = stack.spend.poll_charges()
+        assert billed.usage["provider_response"] == status[1]
+        # Spend logs keep usage extras even with prompt and response storage off.
+        assert kwargs["standard_logging_object"]["metadata"]["usage_object"]["provider_response"] == status[1]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("model", "params", "create", "status", "cost"), PROVIDER_CASES)
+    async def test_both_log_rows_show_the_providers_task_id(
+        self, stack: Stack, model: str, params: dict, create: tuple, status: tuple, cost: float
+    ) -> None:
+        stack.providers.reply("POST", *create)
+        stack.providers.reply("GET", *status)
+        body = status[1]
+        task_id = body["task"]["id"] if "task" in body else body["id"]
+
+        await stack.create(model, **params)
+        await stack.poll(cycles=2)
+
+        ((create_kwargs, _created),) = stack.spend.create_charges()
+        ((poll_kwargs, _billed),) = stack.spend.poll_charges()
+        for kwargs in (create_kwargs, poll_kwargs):
+            metadata = kwargs["standard_logging_object"]["metadata"]
+            assert metadata["spend_logs_metadata"] == {"provider_task_id": task_id}
 
     @pytest.mark.asyncio
     async def test_a_failed_job_that_reports_no_usage_closes_without_a_charge_or_an_alert(

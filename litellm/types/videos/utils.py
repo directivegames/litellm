@@ -20,6 +20,40 @@ CHARACTER_ID_TEMPLATE: Final = "litellm:custom_llm_provider:{};model_id:{};chara
 # carry facts the price needs that the caller's video id must not.
 VIDEO_COST_POLL_ID_KEY: Final = "video_cost_poll_id"
 
+# _hidden_params key on a VideoObject read from a provider's status endpoint. The value is
+# the provider's complete answer, which the cost poller writes onto the finish log row.
+PROVIDER_RESPONSE_KEY: Final = "provider_response"
+
+# _hidden_params key on a VideoObject read from a provider's status endpoint. The value is
+# the provider's own task id, plain, which the cost poller writes onto the finish log row.
+PROVIDER_TASK_ID_KEY: Final = "provider_task_id"
+
+
+def stamp_provider_task_id(logging_obj: object, task_id: str) -> None:
+    """Show the provider's task id in the log row's metadata, next to what the caller sent.
+
+    The caller's video id hides it inside an encoded string. spend_logs_metadata is the one
+    free-form key the spend log keeps. Merging, not replacing, keeps what the caller put there.
+    """
+    details: Final[object] = getattr(logging_obj, "model_call_details", None)
+    if not isinstance(details, dict):
+        return
+    params: object = details.get("litellm_params")
+    if not isinstance(params, dict):
+        params = {}
+        details["litellm_params"] = params
+    # litellm_metadata, when set, is the bucket the spend log reads instead of metadata.
+    bucket: Final = "litellm_metadata" if params.get("litellm_metadata") else "metadata"
+    metadata: object = params.get(bucket)
+    if not isinstance(metadata, dict):
+        metadata = {}
+        params[bucket] = metadata
+    existing: Final[object] = metadata.get("spend_logs_metadata")
+    metadata["spend_logs_metadata"] = {
+        **(existing if isinstance(existing, dict) else {}),
+        PROVIDER_TASK_ID_KEY: task_id,
+    }
+
 
 class DecodedCharacterId(dict):
     """Structure representing a decoded character ID."""

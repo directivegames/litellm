@@ -35,9 +35,12 @@ from litellm.secret_managers.main import get_secret_str
 from litellm.types.router import GenericLiteLLMParams
 from litellm.types.videos.main import VideoCreateOptionalRequestParams, VideoObject
 from litellm.types.videos.utils import (
+    PROVIDER_RESPONSE_KEY,
+    PROVIDER_TASK_ID_KEY,
     VIDEO_COST_POLL_ID_KEY,
     encode_video_id_with_provider,
     extract_original_video_id,
+    stamp_provider_task_id,
 )
 
 if TYPE_CHECKING:
@@ -334,6 +337,7 @@ class MinimaxVideoConfig(BaseVideoConfig):
         if custom_llm_provider:
             video.id = encode_video_id_with_provider(job_id, custom_llm_provider, model)
         video._hidden_params[VIDEO_COST_POLL_ID_KEY] = job_id  # pyright: ignore[reportPrivateUsage]  # the proxy reads adapter facts here
+        stamp_provider_task_id(logging_obj, job_id)
         return video
 
     def transform_video_status_retrieve_request(
@@ -380,6 +384,9 @@ class MinimaxVideoConfig(BaseVideoConfig):
         if isinstance(task, dict):
             _copy_completed_at(video, task.get("completed_at"))
             _copy_failure(video, task.get("error"))
+        # The poller logs the whole provider answer on the finish row; the caller never sees it.
+        video._hidden_params[PROVIDER_RESPONSE_KEY] = payload  # pyright: ignore[reportPrivateUsage]
+        video._hidden_params[PROVIDER_TASK_ID_KEY] = job_id  # pyright: ignore[reportPrivateUsage]
         if custom_llm_provider:
             video.id = encode_video_id_with_provider(job_id, custom_llm_provider, model)
         return video
