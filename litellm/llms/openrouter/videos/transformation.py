@@ -24,7 +24,13 @@ from litellm.llms.openai.videos.transformation import OpenAIVideoConfig
 from litellm.secret_managers.main import get_secret_str
 from litellm.types.router import GenericLiteLLMParams
 from litellm.types.videos.main import VideoCreateOptionalRequestParams, VideoObject
-from litellm.types.videos.utils import VIDEO_COST_POLL_ID_KEY, extract_original_video_id
+from litellm.types.videos.utils import (
+    PROVIDER_RESPONSE_KEY,
+    PROVIDER_TASK_ID_KEY,
+    VIDEO_COST_POLL_ID_KEY,
+    extract_original_video_id,
+    stamp_provider_task_id,
+)
 
 _DEFAULT_API_BASE: Final = "https://openrouter.ai/api/v1"
 _FORWARDED: Final = (
@@ -237,7 +243,9 @@ class OpenRouterVideoConfig(OpenAIVideoConfig):
         )
         # Create has no finished price. Leave usage empty so this call is not billed.
         video.usage = {}
-        video._hidden_params[VIDEO_COST_POLL_ID_KEY] = extract_original_video_id(video.id)  # pyright: ignore[reportPrivateUsage]  # the proxy reads adapter facts here
+        task_id: Final = extract_original_video_id(video.id)
+        video._hidden_params[VIDEO_COST_POLL_ID_KEY] = task_id  # pyright: ignore[reportPrivateUsage]  # the proxy reads adapter facts here
+        stamp_provider_task_id(logging_obj, task_id)
         return video
 
     def transform_video_status_retrieve_response(
@@ -255,6 +263,10 @@ class OpenRouterVideoConfig(OpenAIVideoConfig):
         cost = openrouter_completed_cost(payload)
         if cost is not None:
             video.usage = _openrouter_billed_usage(payload, cost)
+        # The poller logs the whole provider answer on the finish row; the caller never sees it.
+        video._hidden_params[PROVIDER_RESPONSE_KEY] = payload  # pyright: ignore[reportPrivateUsage]
+        if isinstance(payload, dict) and isinstance(payload.get("id"), str):
+            video._hidden_params[PROVIDER_TASK_ID_KEY] = payload["id"]  # pyright: ignore[reportPrivateUsage]
         return video
 
     def transform_video_remix_request(
