@@ -1,11 +1,11 @@
-# Publish the primary proxy image to Docker Hub as directivegames/litellm.
-# Dispatch "Publish Docker Hub". The image tag is <project.version>-dg.<counter>.
-# The counter is the next number for that version already on Docker Hub.
+# Publish the primary proxy image to GitHub Container Registry as ghcr.io/directivegames/litellm.
+# Dispatch "Publish GitHub Container Registry". The image tag is <project.version>-dg.<counter>.
+# The counter is the next number for that version already in the registry.
 # A new project.version starts again at 1. git_ref selects the commit to build.
 # amd64 and arm64 each build on a runner of that architecture, then both are published under one tag.
-# Secrets on directivegames/litellm: DOCKERHUB_USERNAME, DOCKERHUB_TOKEN.
+# Every login uses the workflow's own GITHUB_TOKEN, so the repository needs no registry secrets.
 
-name: Publish Docker Hub
+name: Publish GitHub Container Registry
 
 on:
   workflow_dispatch:
@@ -25,16 +25,20 @@ permissions:
   contents: read
 
 concurrency:
-  group: publish-dockerhub
+  group: publish-ghcr
   cancel-in-progress: false
 
 env:
-  IMAGE: directivegames/litellm
+  IMAGE: ghcr.io/directivegames/litellm
 
 jobs:
   prepare:
     name: Choose image tag
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      # Reads the tags already in the registry to choose the next counter.
+      packages: read
     timeout-minutes: 10
     outputs:
       full_sha: ${{ steps.meta.outputs.full_sha }}
@@ -59,12 +63,12 @@ jobs:
         id: meta
         shell: bash
         env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          REGISTRY_USERNAME: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DRY_RUN: ${{ github.event.inputs.dry_run }}
         run: |
           set -euo pipefail
-          image_tag="$(python .github/scripts/next_dockerhub_tag.py)"
+          image_tag="$(python .github/scripts/next_image_tag.py)"
           full_sha="$(git rev-parse HEAD)"
           sha="$(git rev-parse --short HEAD)"
           if [ "${DRY_RUN}" = "true" ]; then
@@ -88,6 +92,8 @@ jobs:
       contents: read
       # Digest files passed from this job to the publish job.
       actions: write
+      # Pushes each architecture's image by digest.
+      packages: write
     timeout-minutes: 120
     strategy:
       # A failed architecture still lets the other one save its layer cache.
@@ -112,12 +118,13 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
-      - name: Log in to Docker Hub
+      - name: Log in to GitHub Container Registry
         if: needs.prepare.outputs.push == 'true'
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build
         id: build
@@ -129,6 +136,8 @@ jobs:
           # A tag is applied only after both architectures exist, so a pull never sees one architecture alone.
           # Dry runs keep the layer cache and do not push.
           outputs: ${{ needs.prepare.outputs.push == 'true' && format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', env.IMAGE) || 'type=cacheonly' }}
+          # Links the package to this repository, so it takes the repository's access settings.
+          labels: org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           # Attestations stay off. The publish step tags the image from the two digests and does not carry them.
           provenance: false
           sbom: false
@@ -165,6 +174,8 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       actions: read
+      # Pushes the two-architecture tag.
+      packages: write
     timeout-minutes: 20
     steps:
       - name: Download digests
@@ -177,11 +188,12 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
-      - name: Log in to Docker Hub
+      - name: Log in to GitHub Container Registry
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create manifest and push
         shell: bash
@@ -189,6 +201,7 @@ jobs:
         env:
           IMAGE_TAG: ${{ needs.prepare.outputs.image_tag }}
           SHORT_SHA: ${{ needs.prepare.outputs.sha }}
+          SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -203,7 +216,7 @@ jobs:
           done
           docker buildx imagetools create \
             -t "${IMAGE}:${IMAGE_TAG}" \
-            -t "${IMAGE}:${SHORT_SHA}" \
+            -t "${IMAGE}:${SHORT_SHA}"             --annotation "index:org.opencontainers.image.source=${SOURCE_URL}" \
             "${args[@]}"
 
       - name: Inspect image
