@@ -4632,6 +4632,33 @@ async def test_under_budget_does_not_throttle(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("max_budget, spend", [(0.0, 0.0), (10.0, 10.0), (10.0, 10.5)])
+async def test_team_budget_check_blocks_once_spend_reaches_the_cap(max_budget: float, spend: float):
+    team_object: Final = LiteLLM_TeamTable(team_id="test-team", spend=spend, max_budget=max_budget)
+
+    with _patched_spend(spend), pytest.raises(litellm.BudgetExceededError) as exc_info:
+        await _team_max_budget_check(
+            team_object=team_object,
+            valid_token=UserAPIKeyAuth(token="test-token", team_id="test-team"),
+            proxy_logging_obj=_budget_logging_obj(),
+        )
+
+    assert (exc_info.value.current_cost, exc_info.value.max_budget) == (spend, max_budget)
+
+
+@pytest.mark.asyncio
+async def test_team_budget_check_allows_spend_below_the_cap():
+    team_object: Final = LiteLLM_TeamTable(team_id="test-team", spend=9.99, max_budget=10.0)
+
+    with _patched_spend(9.99):
+        await _team_max_budget_check(
+            team_object=team_object,
+            valid_token=UserAPIKeyAuth(token="test-token", team_id="test-team"),
+            proxy_logging_obj=_budget_logging_obj(),
+        )
+
+
+@pytest.mark.asyncio
 async def test_team_budget_check_reads_from_spend_counter():
     """Team budget check should use get_current_spend when counter exists."""
     from litellm.proxy.utils import ProxyLogging
