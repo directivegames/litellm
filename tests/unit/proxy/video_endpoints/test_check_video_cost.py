@@ -457,6 +457,25 @@ class TestBilledWhenTheJobFinishes:
         assert kwargs["standard_logging_object"]["metadata"]["usage_object"]["provider_response"] == status[1]
 
     @pytest.mark.asyncio
+    async def test_the_finish_log_keeps_the_download_link_without_its_signature(self, stack: Stack) -> None:
+        link = "https://ark-content.tos.example/cgt-1/video.mp4"
+        signed = {
+            **_byteplus_task(),
+            "content": {"video_url": f"{link}?X-Tos-Signature=abc123&X-Tos-Expires=86400#t=0"},
+            "callback_url": "https://callbacks.example/done?token=secret",
+        }
+        stack.providers.reply("POST", BYTEPLUS_CREATE, {"id": "cgt-1"})
+        stack.providers.reply("GET", BYTEPLUS_STATUS, signed)
+
+        await stack.create("bytedance/seedance-2.5", duration=5, resolution="720p")
+        await stack.poll(cycles=2)
+
+        ((kwargs, billed),) = stack.spend.poll_charges()
+        stored = kwargs["standard_logging_object"]["metadata"]["usage_object"]["provider_response"]
+        assert stored == {**signed, "content": {"video_url": link}, "callback_url": "https://callbacks.example/done"}
+        assert billed.usage["provider_response"] == stored
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(("model", "params", "create", "status", "cost"), PROVIDER_CASES)
     async def test_the_create_row_shows_the_budget_hold_estimate_and_the_finish_row_its_real_cost(
         self, stack: Stack, model: str, params: dict, create: tuple, status: tuple, cost: float
