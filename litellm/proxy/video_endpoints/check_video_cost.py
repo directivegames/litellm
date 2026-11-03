@@ -16,6 +16,10 @@ Each pending row also stores the create-time price estimate (PollRecord.estimate
 video_budget_hold.py holds against the creator's key and Team budgets; unbilled_video_estimate sums
 the estimates of jobs not yet billed. Billing still uses only what the provider reports.
 
+The finish spend row keeps the provider's whole status answer, with the query string cut off
+every web address in it: a finished video's download link is signed in its query string, and
+spend logs are kept long after the link should stop working.
+
 The finish spend row's request id is the video id plus _video_cost, so it is not dropped as a
 duplicate of the create row. Its start and end are the job's lifetime, which is what the logs
 page shows as Duration. Its model field is the deployment wire model (litellm_params.model),
@@ -34,6 +38,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, Protocol, cast
+from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -532,7 +537,9 @@ class CheckVideoCost:
         # The provider's whole answer rides in usage because spend logs keep usage extras
         # (additional_usage_values) even with prompt and response storage off. The caller's
         # own copy of the video never carries it.
-        provider_response: Final[object] = video._hidden_params.get(PROVIDER_RESPONSE_KEY)  # pyright: ignore[reportPrivateUsage]
+        provider_response: Final[object] = _without_link_signatures(
+            video._hidden_params.get(PROVIDER_RESPONSE_KEY)  # pyright: ignore[reportPrivateUsage]
+        )
         billed_usage: Final = {**(video.usage or {}), PROVIDER_RESPONSE_KEY: provider_response}
         billed: Final = video.model_copy(update=MappingProxyType({"id": job.unified_object_id, "usage": billed_usage}))
         billed._hidden_params = {  # pyright: ignore[reportPrivateUsage]  # logging reads the cost here  # mutable-ok: logging writes into it
@@ -581,6 +588,22 @@ def _failure_metadata(video: "VideoObject") -> Mapping[str, object]:
             },
         }
     )
+
+
+def _without_link_signatures(value: object) -> object:
+    """The provider's answer with every web address cut back to its scheme, host, and path."""
+    if isinstance(value, str):
+        if not value.startswith(("http://", "https://")):
+            return value
+        parts: Final = urlsplit(value)
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+    if isinstance(value, Mapping):
+        mapping: Final = cast(Mapping[object, object], value)
+        return {key: _without_link_signatures(item) for key, item in mapping.items()}  # mutable-ok: serialized into the spend log
+    if isinstance(value, list | tuple):
+        items: Final = cast(Sequence[object], value)
+        return [_without_link_signatures(item) for item in items]  # mutable-ok: serialized into the spend log
+    return value
 
 
 def _logging_obj(
