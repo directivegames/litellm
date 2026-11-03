@@ -21,8 +21,12 @@ duplicate of the create row. Its start and end are the job's lifetime, which is 
 page shows as Duration. Its model field is the deployment wire model (litellm_params.model),
 same as the create row, not the provider status payload's model name.
 
-Callers: the /videos create endpoint (record_pending_video_job), video_budget_hold.py
-(unbilled_video_estimate), and ProxyStartupEvent.initialize_scheduled_background_jobs (CheckVideoCost).
+The same row says who made the video: the status, download, and remix endpoints read it with
+find_video_job_owner and refuse a caller who may not see it.
+
+Callers: the /videos create endpoint (record_pending_video_job), the status, download, and remix
+endpoints (find_video_job_owner), video_budget_hold.py (unbilled_video_estimate), and
+ProxyStartupEvent.initialize_scheduled_background_jobs (CheckVideoCost).
 """
 
 import math
@@ -86,10 +90,16 @@ class _VideoJobRow(Protocol):
     def file_object(self) -> object: ...
     @property
     def created_at(self) -> datetime: ...
+    @property
+    def created_by(self) -> str | None: ...
+    @property
+    def team_id(self) -> str | None: ...
 
 
 class _VideoJobTable(Protocol):
     async def create(self, data: Mapping[str, object]) -> object: ...
+
+    async def find_first(self, where: Mapping[str, object]) -> _VideoJobRow | None: ...
 
     async def find_many(
         self, where: Mapping[str, object], take: int, order: Mapping[str, str]
@@ -102,6 +112,23 @@ class _VideoJobTable(Protocol):
 
 def _video_jobs(prisma_client: "PrismaClient") -> _VideoJobTable:
     return cast(_VideoJobTable, prisma_client.db.litellm_managedobjecttable)  # cast-ok: generated Prisma client
+
+
+class VideoJobOwner(BaseModel):
+    """Who made a video job: the creator's user id and Team, as its row stores them."""
+
+    model_config = ConfigDict(frozen=True)
+
+    created_by: str | None
+    team_id: str | None
+
+
+async def find_video_job_owner(prisma_client: "PrismaClient", video_id: str) -> VideoJobOwner | None:
+    """The owner of the video job stored under the id its caller holds, or None when no job has that id."""
+    row: Final = await _video_jobs(prisma_client).find_first(
+        where={"unified_object_id": video_id, "file_purpose": VIDEO_FILE_PURPOSE}
+    )
+    return None if row is None else VideoJobOwner(created_by=row.created_by, team_id=row.team_id)
 
 
 class PollRecord(BaseModel):

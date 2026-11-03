@@ -30,7 +30,8 @@ import json
 from contextlib import ExitStack
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Any, Dict, Optional
+from collections.abc import Mapping
+from typing import Any, Dict, Final, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import orjson
@@ -39,7 +40,7 @@ import pytest
 
 import litellm.proxy.proxy_server as proxy_server
 import litellm.proxy.video_endpoints.endpoints as endpoints
-from litellm.proxy._types import UserAPIKeyAuth
+from litellm.proxy._types import LitellmUserRoles, ProxyException, UserAPIKeyAuth
 from litellm.proxy.common_request_processing import ProxyBaseLLMRequestProcessing
 from litellm.proxy.utils import ProxyLogging
 from litellm.proxy.video_endpoints.utils import encode_video_id_in_response
@@ -813,3 +814,90 @@ def test_deployment_id_resolves_to_the_row_that_created_the_job():
 
     model_id = decode_video_id_with_provider(returned.id).get("model_id")
     assert router.resolve_model_name_from_model_id(model_id) == "openrouter/minimax/hailuo-3"
+
+# =========================================================================== #
+#   Who may see a video: the job row the create endpoint stored               #
+# =========================================================================== #
+
+
+class _OwnedJobs:
+    """The job table holding one video job, made by user-a on team-a."""
+
+    def __init__(self) -> None:
+        self.lookups: list[Mapping[str, object]] = []  # mutable-ok: records each lookup in order
+
+    async def find_first(self, where: Mapping[str, object]) -> SimpleNamespace | None:
+        self.lookups.append(where)
+        if where.get("unified_object_id") != AZURE_VIDEO_ID:
+            return None
+        return SimpleNamespace(created_by="user-a", team_id="team-a")
+
+
+def _with_jobs():
+    jobs: Final = _OwnedJobs()
+    prisma: Final = SimpleNamespace(db=SimpleNamespace(litellm_managedobjecttable=jobs))
+    return jobs, patch.object(proxy_server, "prisma_client", prisma)  # test-quality-ok: the endpoint's database is this global
+
+
+def _caller(
+    team_id: str | None = None, user_id: str | None = None, user_role: LitellmUserRoles | None = None
+) -> UserAPIKeyAuth:
+    return UserAPIKeyAuth(api_key="sk-caller", team_id=team_id, user_id=user_id, user_role=user_role)
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda user: endpoints.video_status(
+            video_id=AZURE_VIDEO_ID, request=FakeRequest(), fastapi_response=Response(), user_api_key_dict=user
+        ),
+        lambda user: endpoints.video_content(
+            video_id=AZURE_VIDEO_ID, request=FakeRequest(), fastapi_response=Response(), user_api_key_dict=user
+        ),
+        lambda user: endpoints.video_remix(
+            video_id=AZURE_VIDEO_ID, request=FakeRequest(), fastapi_response=Response(), user_api_key_dict=user
+        ),
+    ],
+    ids=["status", "content", "remix"],
+)
+@pytest.mark.asyncio
+async def test_another_teams_video_is_not_found_and_never_reaches_the_provider(harness, call):
+    jobs, patched = _with_jobs()
+    with patched, pytest.raises(ProxyException) as refused:
+        await call(_caller(team_id="team-b", user_id="user-b"))
+
+    assert refused.value.code == "404"
+    assert jobs.lookups == [{"unified_object_id": AZURE_VIDEO_ID, "file_purpose": "video"}]
+    harness.base_process.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_video_with_no_job_row_is_not_found(harness):
+    _, patched = _with_jobs()
+    with patched, pytest.raises(ProxyException) as refused:
+        await endpoints.video_status(
+            video_id="video_plain", request=FakeRequest(), fastapi_response=Response(), user_api_key_dict=_caller(team_id="team-a")
+        )
+
+    assert refused.value.code == "404"
+    harness.base_process.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "caller",
+    [
+        _caller(team_id="team-a", user_id="user-other"),
+        _caller(team_id="team-moved", user_id="user-a"),
+        _caller(user_role=LitellmUserRoles.PROXY_ADMIN),
+    ],
+    ids=["same team", "same creator", "proxy admin"],
+)
+@pytest.mark.asyncio
+async def test_the_videos_team_its_creator_and_an_admin_may_see_it(harness, caller):
+    _, patched = _with_jobs()
+    with patched:
+        resp: Final = await endpoints.video_status(
+            video_id=AZURE_VIDEO_ID, request=FakeRequest(), fastapi_response=Response(), user_api_key_dict=caller
+        )
+
+    assert resp is SENTINEL
