@@ -34593,8 +34593,14 @@ export interface components {
             cache_creation_input_audio_token_cost?: number | null;
             /** Cache Creation Input Token Cost */
             cache_creation_input_token_cost?: number | null;
+            /** Cache Creation Input Token Cost Above 100K Tokens */
+            cache_creation_input_token_cost_above_100k_tokens?: number | null;
+            /** Cache Creation Input Token Cost Above 100K Tokens Batches */
+            cache_creation_input_token_cost_above_100k_tokens_batches?: number | null;
             /** Cache Creation Input Token Cost Above 1Hr */
             cache_creation_input_token_cost_above_1hr?: number | null;
+            /** Cache Creation Input Token Cost Above 1Hr Above 100K Tokens */
+            cache_creation_input_token_cost_above_1hr_above_100k_tokens?: number | null;
             /** Cache Creation Input Token Cost Above 200K Tokens */
             cache_creation_input_token_cost_above_200k_tokens?: number | null;
             /** Cache Creation Input Token Cost Above 200K Tokens Batches */
@@ -34623,6 +34629,10 @@ export interface components {
             cache_read_input_image_token_cost?: number | null;
             /** Cache Read Input Token Cost */
             cache_read_input_token_cost?: number | null;
+            /** Cache Read Input Token Cost Above 100K Tokens */
+            cache_read_input_token_cost_above_100k_tokens?: number | null;
+            /** Cache Read Input Token Cost Above 100K Tokens Batches */
+            cache_read_input_token_cost_above_100k_tokens_batches?: number | null;
             /** Cache Read Input Token Cost Above 200K Tokens */
             cache_read_input_token_cost_above_200k_tokens?: number | null;
             /** Cache Read Input Token Cost Above 200K Tokens Batches */
@@ -34707,6 +34717,10 @@ export interface components {
             input_cost_per_second?: number | null;
             /** Input Cost Per Token */
             input_cost_per_token?: number | null;
+            /** Input Cost Per Token Above 100K Tokens */
+            input_cost_per_token_above_100k_tokens?: number | null;
+            /** Input Cost Per Token Above 100K Tokens Batches */
+            input_cost_per_token_above_100k_tokens_batches?: number | null;
             /** Input Cost Per Token Above 128K Tokens */
             input_cost_per_token_above_128k_tokens?: number | null;
             /** Input Cost Per Token Above 200K Tokens */
@@ -34836,6 +34850,10 @@ export interface components {
             output_cost_per_second_768p?: number | null;
             /** Output Cost Per Token */
             output_cost_per_token?: number | null;
+            /** Output Cost Per Token Above 100K Tokens */
+            output_cost_per_token_above_100k_tokens?: number | null;
+            /** Output Cost Per Token Above 100K Tokens Batches */
+            output_cost_per_token_above_100k_tokens_batches?: number | null;
             /** Output Cost Per Token Above 128K Tokens */
             output_cost_per_token_above_128k_tokens?: number | null;
             /** Output Cost Per Token Above 200K Tokens */
@@ -34912,6 +34930,10 @@ export interface components {
             } | null;
             /** Stream Timeout */
             stream_timeout?: number | string | null;
+            /** Stream Timeout By Service Tier */
+            stream_timeout_by_service_tier?: {
+                [key: string]: number;
+            } | null;
             /** Tag Regex */
             tag_regex?: string[] | null;
             /** Tags */
@@ -34924,6 +34946,10 @@ export interface components {
             }[] | null;
             /** Timeout */
             timeout?: number | string | null;
+            /** Timeout By Service Tier */
+            timeout_by_service_tier?: {
+                [key: string]: number;
+            } | null;
             /** Tpm */
             tpm?: number | null;
             /** Use Chat Completions Api */
@@ -46043,9 +46069,17 @@ export interface components {
          * @description Response structure for token count details with modality breakdown.
          *
          *     Example:
-         *         {'totalTokens': 12, 'promptTokensDetails': [{'modality': 'TEXT', 'tokenCount': 12}]}
+         *         {'totalTokens': 12, 'promptTokensDetails': [{'modality': 'TEXT', 'tokenCount': 12}],
+         *          'litellm_count_source': 'provider'}
          */
         TokenCountDetailsResponse: {
+            /** Litellm Count Model */
+            litellm_count_model?: string;
+            /**
+             * Litellm Count Source
+             * @enum {string}
+             */
+            litellm_count_source?: "provider" | "token_count_model" | "local_estimate";
             /** Prompttokensdetails */
             promptTokensDetails: components["schemas"]["PromptTokensDetails"][];
             /** Totaltokens */
@@ -46074,6 +46108,8 @@ export interface components {
         };
         /** TokenCountResponse */
         TokenCountResponse: {
+            /** Count Source */
+            count_source?: ("provider" | "token_count_model" | "local_estimate") | null;
             /**
              * Error
              * @default false
@@ -49065,8 +49101,14 @@ export interface components {
             cache_creation_input_audio_token_cost?: number | null;
             /** Cache Creation Input Token Cost */
             cache_creation_input_token_cost?: number | null;
+            /** Cache Creation Input Token Cost Above 100K Tokens */
+            cache_creation_input_token_cost_above_100k_tokens?: number | null;
+            /** Cache Creation Input Token Cost Above 100K Tokens Batches */
+            cache_creation_input_token_cost_above_100k_tokens_batches?: number | null;
             /** Cache Creation Input Token Cost Above 1Hr */
             cache_creation_input_token_cost_above_1hr?: number | null;
+            /** Cache Creation Input Token Cost Above 1Hr Above 100K Tokens */
+            cache_creation_input_token_cost_above_1hr_above_100k_tokens?: number | null;
             /** Cache Creation Input Token Cost Above 200K Tokens */
             cache_creation_input_token_cost_above_200k_tokens?: number | null;
             /** Cache Creation Input Token Cost Above 200K Tokens Batches */
@@ -49095,6 +49137,10 @@ export interface components {
             cache_read_input_image_token_cost?: number | null;
             /** Cache Read Input Token Cost */
             cache_read_input_token_cost?: number | null;
+            /** Cache Read Input Token Cost Above 100K Tokens */
+            cache_read_input_token_cost_above_100k_tokens?: number | null;
+            /** Cache Read Input Token Cost Above 100K Tokens Batches */
+            cache_read_input_token_cost_above_100k_tokens_batches?: number | null;
             /** Cache Read Input Token Cost Above 200K Tokens */
             cache_read_input_token_cost_above_200k_tokens?: number | null;
             /** Cache Read Input Token Cost Above 200K Tokens Batches */
@@ -49179,6 +49225,10 @@ export interface components {
             input_cost_per_second?: number | null;
             /** Input Cost Per Token */
             input_cost_per_token?: number | null;
+            /** Input Cost Per Token Above 100K Tokens */
+            input_cost_per_token_above_100k_tokens?: number | null;
+            /** Input Cost Per Token Above 100K Tokens Batches */
+            input_cost_per_token_above_100k_tokens_batches?: number | null;
             /** Input Cost Per Token Above 128K Tokens */
             input_cost_per_token_above_128k_tokens?: number | null;
             /** Input Cost Per Token Above 200K Tokens */
@@ -49308,6 +49358,10 @@ export interface components {
             output_cost_per_second_768p?: number | null;
             /** Output Cost Per Token */
             output_cost_per_token?: number | null;
+            /** Output Cost Per Token Above 100K Tokens */
+            output_cost_per_token_above_100k_tokens?: number | null;
+            /** Output Cost Per Token Above 100K Tokens Batches */
+            output_cost_per_token_above_100k_tokens_batches?: number | null;
             /** Output Cost Per Token Above 128K Tokens */
             output_cost_per_token_above_128k_tokens?: number | null;
             /** Output Cost Per Token Above 200K Tokens */
@@ -49384,6 +49438,10 @@ export interface components {
             } | null;
             /** Stream Timeout */
             stream_timeout?: number | string | null;
+            /** Stream Timeout By Service Tier */
+            stream_timeout_by_service_tier?: {
+                [key: string]: number;
+            } | null;
             /** Tag Regex */
             tag_regex?: string[] | null;
             /** Tags */
@@ -49396,6 +49454,10 @@ export interface components {
             }[] | null;
             /** Timeout */
             timeout?: number | string | null;
+            /** Timeout By Service Tier */
+            timeout_by_service_tier?: {
+                [key: string]: number;
+            } | null;
             /** Tpm */
             tpm?: number | null;
             /** Use Chat Completions Api */

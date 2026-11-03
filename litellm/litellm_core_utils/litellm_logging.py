@@ -40,6 +40,7 @@ from litellm.constants import (
     DEFAULT_MOCK_RESPONSE_COMPLETION_TOKEN_COUNT,
     DEFAULT_MOCK_RESPONSE_PROMPT_TOKEN_COUNT,
     EMPTY_MAPPING,
+    LITELLM_LOGGING_NO_UPSTREAM_LLM_CALL,
     PROVIDER_REQUEST_ID_HEADERS,
     REDACTED_BY_LITELLM,
 )
@@ -493,7 +494,7 @@ def _published_pricing(deployment_model: str | None) -> ModelInfo | None:
         return None
 
 
-def _resolve_vertex_location_for_cost(
+def resolve_vertex_location_for_cost(
     custom_llm_provider: str | None,
     litellm_params: Mapping[str, object] | None,
     optional_params: Mapping[str, object] | None,
@@ -680,6 +681,9 @@ class Logging(LiteLLMLoggingBaseClass):
         self.truncated_messages_for_logging: str | list | dict | None = None  # mutable-ok: logged messages shape
         ## TIME TO FIRST TOKEN LOGGING ##
         self.completion_start_time: datetime.datetime | None = None
+        # The model the proxy shows the client on streamed chunks. The logged streamed response carries it
+        # once that response is priced, the same way a non-streamed response is logged
+        self.client_facing_stream_model: str | None = None
         self.zero_cost_warned: bool = False
         self._llm_caching_handler: LLMCachingHandler | None = None
 
@@ -719,6 +723,7 @@ class Logging(LiteLLMLoggingBaseClass):
         self._defer_async_logging: bool = False
         self._enqueue_deferred_logging: Callable[[], None] | None = None
         self._async_success_scheduled: bool = False
+        self._async_success_enqueued: bool = False
         self._on_detached_stream_failure: Callable[[Exception], Awaitable[None]] | None = None
         self.shadow_eval_request_snapshot: GuardrailRequestSnapshot | None = None
 
@@ -1407,15 +1412,20 @@ class Logging(LiteLLMLoggingBaseClass):
                         "LiteLLM.LoggingError: [Non-Blocking] Exception occurred while logging %s", e
                     )
 
-            self.model_call_details["api_call_start_time"] = datetime.datetime.now()
-            # Set-once first provider-handoff instant. api_call_start_time
-            # is overwritten on every retry, so it can't measure one-time
-            # preprocessing; pinning the first attempt excludes retry loops
-            # + backoff. Logging object only — must NOT go into
-            # litellm_params["metadata"] (caller request metadata, typed
-            # Dict[str, str], echoed downstream; a datetime breaks it).
-            if self.model_call_details.get("first_api_call_start_time") is None:
-                self.model_call_details["first_api_call_start_time"] = self.model_call_details["api_call_start_time"]
+            # A proxy-gate failure (auth, rate limit, client disconnect) fires pre_call for its callbacks
+            # without any provider handoff, so it must not stamp the handoff instants.
+            if LITELLM_LOGGING_NO_UPSTREAM_LLM_CALL not in self.model_call_details:
+                self.model_call_details["api_call_start_time"] = datetime.datetime.now()
+                # Set-once first provider-handoff instant. api_call_start_time
+                # is overwritten on every retry, so it can't measure one-time
+                # preprocessing; pinning the first attempt excludes retry loops
+                # + backoff. Logging object only — must NOT go into
+                # litellm_params["metadata"] (caller request metadata, typed
+                # Dict[str, str], echoed downstream; a datetime breaks it).
+                if self.model_call_details.get("first_api_call_start_time") is None:
+                    self.model_call_details["first_api_call_start_time"] = self.model_call_details[
+                        "api_call_start_time"
+                    ]
             # Input Integration Logging -> If you want to log the fact that an attempt to call the model was made
             callbacks: Final = litellm.input_callback + (self.dynamic_input_callbacks or [])
             for callback in callbacks:
@@ -1874,7 +1884,7 @@ class Logging(LiteLLMLoggingBaseClass):
             router_model_id = self.get_router_model_id()
 
         ## RESPONSE COST ##
-        custom_pricing: Final = self._custom_pricing_for(priced_result)
+        custom_pricing: Final = self.custom_pricing_for(priced_result)
 
         prompt = self._prompt_for_cost_calculation()
 
@@ -1900,7 +1910,7 @@ class Logging(LiteLLMLoggingBaseClass):
                     if hasattr(self, "litellm_params") and self.litellm_params
                     else None
                 ),
-                "vertex_location": _resolve_vertex_location_for_cost(
+                "vertex_location": resolve_vertex_location_for_cost(
                     custom_llm_provider=self.model_call_details.get("custom_llm_provider", None),
                     litellm_params=(self.litellm_params if hasattr(self, "litellm_params") else None),
                     optional_params=self.optional_params,
@@ -2012,7 +2022,7 @@ class Logging(LiteLLMLoggingBaseClass):
             model=model,
             completion_response=result,
             custom_llm_provider=custom_llm_provider,
-            custom_pricing=self._custom_pricing_for(result),
+            custom_pricing=self.custom_pricing_for(result),
             base_model=_get_base_model_from_metadata(model_call_details=self.model_call_details),
             router_model_id=router_model_id or self.get_router_model_id(),
             region_name=_resolve_mantle_region_for_cost(
@@ -2037,20 +2047,23 @@ class Logging(LiteLLMLoggingBaseClass):
             usage=usage,
         )
 
-    def _custom_pricing_for(self, result: object) -> bool:
-        litellm_params: Final = getattr(self, "litellm_params", None)
+    def spilled_over_ptu_for(self, result: object) -> bool:
         result_hidden_params: Final = getattr(result, "_hidden_params", None) or MappingProxyType({})
         additional_headers: Final = (
             result_hidden_params.get("additional_headers")
             if isinstance(result_hidden_params, dict)
             else getattr(result_hidden_params, "additional_headers", None)
         )
-        spilled_over: Final = is_spilled_over_ptu_request(
-            model_info=_deployment_model_info(litellm_params),
+        return is_spilled_over_ptu_request(
+            model_info=_deployment_model_info(getattr(self, "litellm_params", None)),
             response_headers=self.model_call_details.get("response_headers"),
             additional_headers=additional_headers,
         )
-        return False if spilled_over else use_custom_pricing_for_model(litellm_params=litellm_params)
+
+    def custom_pricing_for(self, result: object) -> bool:
+        if self.spilled_over_ptu_for(result):
+            return False
+        return use_custom_pricing_for_model(litellm_params=getattr(self, "litellm_params", None))
 
     def _prompt_for_cost_calculation(self) -> str:
         """
@@ -2256,6 +2269,16 @@ class Logging(LiteLLMLoggingBaseClass):
             return True
         except Exception:
             return True
+
+    @property
+    def async_success_log_enqueued(self) -> bool:
+        """True once the success log task was actually created, not merely claimed, so a later failure raised
+        around it (a disconnect cancelling a still-pending guardrail task) must not bill the prompt a second
+        time. A claimed log parked in the deferred slot never runs once a 499 interrupts, so it stays False."""
+        return self._async_success_enqueued
+
+    def mark_async_success_log_enqueued(self) -> None:
+        self._async_success_enqueued = True
 
     def claim_async_success_log(self) -> bool:
         """One async success log per request. The innermost @client wrapper always exits first,
@@ -2493,6 +2516,15 @@ class Logging(LiteLLMLoggingBaseClass):
             )
             setattr(result, "usage", transformed_usage)
         return result
+
+    def _with_client_facing_stream_model(
+        self,
+        response: ModelResponse | TextCompletionResponse | ResponsesAPIResponse | InteractionsAPIResponse,
+    ) -> ModelResponse | TextCompletionResponse | ResponsesAPIResponse | InteractionsAPIResponse:
+        model: Final = self.client_facing_stream_model
+        if model is None or getattr(response, "model", None) in (None, model):
+            return response
+        return response.model_copy(update={"model": model})
 
     def _success_handler_helper_fn(
         self,
@@ -2811,9 +2843,11 @@ class Logging(LiteLLMLoggingBaseClass):
                     result=complete_streaming_response
                 )
                 self._merge_hidden_params_from_response_into_metadata(complete_streaming_response)
+                logged_streaming_response: Final = self._with_client_facing_stream_model(complete_streaming_response)
+                self.model_call_details["complete_streaming_response"] = logged_streaming_response
                 ## STANDARDIZED LOGGING PAYLOAD
                 self.model_call_details["standard_logging_object"] = self._build_standard_logging_payload(
-                    complete_streaming_response, start_time, end_time
+                    logged_streaming_response, start_time, end_time
                 )
                 standard_logging_payload: Final[StandardLoggingPayload | None] = self.model_call_details.get(
                     "standard_logging_object"
@@ -3269,6 +3303,12 @@ class Logging(LiteLLMLoggingBaseClass):
                     model_name=self.get_deployment_model_for_cost(),
                     litellm_params=self.litellm_params,
                     model_info=self.get_router_deployment_model_info(),
+                    vertex_location=resolve_vertex_location_for_cost(
+                        custom_llm_provider=self.custom_llm_provider,
+                        litellm_params=(self.litellm_params if hasattr(self, "litellm_params") else None),
+                        optional_params=None,
+                        model=self.get_deployment_model_for_cost() or self.model,
+                    ),
                 )
 
                 result._hidden_params["response_cost"] = batch_result.cost
@@ -3352,10 +3392,13 @@ class Logging(LiteLLMLoggingBaseClass):
 
             await self._prepare_baseline_cache_estimate(complete_streaming_response)
 
+            logged_streaming_response: Final = self._with_client_facing_stream_model(complete_streaming_response)
+            self.model_call_details["async_complete_streaming_response"] = logged_streaming_response
+
             ## STANDARDIZED LOGGING PAYLOAD
             try:
                 self.model_call_details["standard_logging_object"] = self._build_standard_logging_payload(
-                    complete_streaming_response, start_time, end_time
+                    logged_streaming_response, start_time, end_time
                 )
             except Exception:  # noqa: BLE001  # payload build must never block later callbacks (slot release)
                 verbose_logger.exception(
@@ -5927,6 +5970,7 @@ class StandardLoggingPayloadSetup:
         custom_llm_provider: str | None,
         init_response_obj: object,
         api_base: str | None = None,
+        router_model_id: str | None = None,
     ) -> StandardLoggingModelInformation:
         model_cost_name: Final = _select_model_name_for_cost_calc(
             model=base_model if custom_pricing else None,
@@ -5934,12 +5978,23 @@ class StandardLoggingPayloadSetup:
             base_model=base_model,
             custom_pricing=custom_pricing,
         )
+        pricing_model_name: Final = (
+            _select_model_name_for_cost_calc(
+                model=base_model if custom_pricing else None,
+                completion_response=init_response_obj,
+                base_model=base_model,
+                custom_pricing=custom_pricing,
+                router_model_id=router_model_id,
+            )
+            if router_model_id is not None
+            else model_cost_name
+        )
         if model_cost_name is None:
             model_cost_information = StandardLoggingModelInformation(model_map_key="", model_map_value=None)
         else:
             try:
                 _model_cost_information: Final = litellm.get_model_info(
-                    model=model_cost_name,
+                    model=pricing_model_name or model_cost_name,
                     custom_llm_provider=custom_llm_provider,
                     api_base=api_base,
                 )
@@ -6329,19 +6384,13 @@ class StandardLoggingPayloadSetup:
         # check for 'tags' in both 'metadata' and 'litellm_metadata'
         metadata: Final = litellm_params.get("metadata") or {}
         litellm_metadata: Final = litellm_params.get("litellm_metadata") or {}
-        if metadata.get("tags", []):
-            request_tags = metadata.get("tags", []).copy()
-        elif litellm_metadata.get("tags", []):
-            request_tags = litellm_metadata.get("tags", []).copy()
-        else:
-            request_tags = []
+        request_tags: Final = next(
+            (tags for tags in (metadata.get("tags"), litellm_metadata.get("tags")) if isinstance(tags, list) and tags),
+            [],
+        )
         user_agent_tags: Final = StandardLoggingPayloadSetup._get_user_agent_tags(proxy_server_request)
         additional_header_tags: Final = StandardLoggingPayloadSetup._get_extra_header_tags(proxy_server_request)
-        if user_agent_tags is not None:
-            request_tags.extend(user_agent_tags)
-        if additional_header_tags is not None:
-            request_tags.extend(additional_header_tags)
-        return request_tags
+        return [*request_tags, *(user_agent_tags or ()), *(additional_header_tags or ())]
 
 
 def _get_status_fields(
@@ -6577,13 +6626,16 @@ def get_standard_logging_object_payload(
             )
 
         ## Get model cost information ##
-        base_model = _get_base_model_from_metadata(model_call_details=kwargs)
-        # The router overrides completion_response.model to the model-group alias before
-        # this payload is built, so cost-map lookup via that alias always misses.
-        # Fall back to the actual deployment model set by the router in metadata.
-        if base_model is None:
-            base_model = metadata.get("deployment")
-        custom_pricing: Final = use_custom_pricing_for_model(litellm_params=litellm_params)
+        configured_base_model: Final = _get_base_model_from_metadata(model_call_details=kwargs)
+        spilled_over: Final = logging_obj.spilled_over_ptu_for(init_response_obj)
+        # The router overrides completion_response.model to the model-group alias before this payload is
+        # built, so cost-map lookup via that alias misses and the deployment model stands in for base_model.
+        # A PTU request Azure spilled onto pay-as-you-go capacity is billed at the served model's rates,
+        # which the deployment's zeroed PTU entry would misreport, so that fallback is skipped there.
+        base_model: Final = (
+            metadata.get("deployment") if configured_base_model is None and not spilled_over else configured_base_model
+        )
+        custom_pricing: Final = False if spilled_over else logging_obj.custom_pricing_for(init_response_obj)
         raw_response_cost: Final = kwargs.get("response_cost")
         llm_response_cost: Final[float] = raw_response_cost or 0.0
         guardrail_cost: Final = guardrail_information_cost(metadata.get("standard_logging_guardrail_information"))
@@ -6605,6 +6657,7 @@ def get_standard_logging_object_payload(
             custom_llm_provider=kwargs.get("custom_llm_provider"),
             init_response_obj=init_response_obj,
             api_base=litellm_params.get("api_base"),
+            router_model_id=logging_obj.get_router_model_id(),
         )
 
         error_information, error_str = StandardLoggingPayloadSetup.get_error_information_for_logging_payload(

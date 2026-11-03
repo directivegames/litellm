@@ -9,6 +9,7 @@ from typing import (
     Any,
     Final,
     Literal,
+    TypeAlias,
     get_args,
 )
 
@@ -55,6 +56,7 @@ from litellm.types.llms.base import (
     LiteLLMPydanticObjectBase,
 )
 from litellm.types.mcp import MCPServerCostInfo
+from litellm.types.token_count import TokenCountModelInfo, TokenCountSource, TokenCountTokenizer
 
 from ..litellm_core_utils.core_helpers import map_finish_reason, process_response_headers
 from . import litellm_params as _litellm_params
@@ -211,12 +213,21 @@ class ProviderSpecificModelInfo(TypedDict, total=False):
     vertex_ai_audio_api: ReadOnly[Literal["lyria_predict", "lyria_interactions"] | None]
     bedrock_output_config_effort_ceiling: Literal["low", "medium", "high", "max", "xhigh"] | None
     bedrock_converse_supports_strict_tools: bool | None
+    token_count_framing: ReadOnly[int | None]
+    token_count_model: ReadOnly[TokenCountModelInfo | None]
+    token_count_tokenizer: ReadOnly[TokenCountTokenizer | None]
 
 
 class SearchContextCostPerQuery(TypedDict, total=False):
     search_context_size_low: float
     search_context_size_medium: float
     search_context_size_high: float
+
+
+class SearchFreeRequests(TypedDict):
+    count: ReadOnly[int]
+    period: ReadOnly[Literal["day", "month"]]
+    shared_group: ReadOnly[str]
 
 
 class AgenticLoopParams(TypedDict, total=False):
@@ -281,6 +292,8 @@ class ModelInfoBase(ProviderSpecificModelInfo, total=False):
     input_cost_per_token_ultrafast: ReadOnly[float | None]  # OpenAI ultrafast service tier pricing
     cache_creation_input_token_cost: float | None
     cache_creation_input_token_cost_above_200k_tokens: float | None
+    cache_creation_input_token_cost_above_100k_tokens: ReadOnly[float | None]
+    cache_creation_input_token_cost_above_1hr_above_100k_tokens: ReadOnly[float | None]
     cache_creation_input_token_cost_above_272k_tokens: float | None
     cache_creation_input_token_cost_above_272k_tokens_priority: float | None
     cache_creation_input_token_cost_above_272k_tokens_flex: float | None
@@ -297,6 +310,7 @@ class ModelInfoBase(ProviderSpecificModelInfo, total=False):
     cache_read_input_token_cost_balanced: ReadOnly[float | None]
     cache_read_input_token_cost_ultrafast: ReadOnly[float | None]  # OpenAI ultrafast service tier pricing
     cache_read_input_token_cost_above_200k_tokens: float | None
+    cache_read_input_token_cost_above_100k_tokens: ReadOnly[float | None]
     cache_read_input_token_cost_above_200k_tokens_priority: float | None
     cache_read_input_token_cost_above_272k_tokens: float | None
     cache_read_input_token_cost_above_272k_tokens_priority: float | None
@@ -305,9 +319,11 @@ class ModelInfoBase(ProviderSpecificModelInfo, total=False):
     cache_read_input_token_cost_above_512k_tokens: float | None
     cache_read_input_token_cost_batches: ReadOnly[float | None]
     cache_read_input_token_cost_above_200k_tokens_batches: ReadOnly[float | None]
+    cache_read_input_token_cost_above_100k_tokens_batches: ReadOnly[float | None]
     cache_read_input_token_cost_above_272k_tokens_batches: ReadOnly[float | None]
     cache_creation_input_token_cost_batches: ReadOnly[float | None]
     cache_creation_input_token_cost_above_200k_tokens_batches: ReadOnly[float | None]
+    cache_creation_input_token_cost_above_100k_tokens_batches: ReadOnly[float | None]
     cache_creation_input_token_cost_above_272k_tokens_batches: ReadOnly[float | None]
     # Smallest prefix this model will actually cache, whatever caching mechanism its provider uses.
     # Absent means the provider-agnostic default applies; see MINIMUM_PROMPT_CACHE_TOKEN_COUNT.
@@ -317,6 +333,7 @@ class ModelInfoBase(ProviderSpecificModelInfo, total=False):
     input_cost_per_audio_token: float | None
     input_cost_per_token_above_128k_tokens: float | None  # only for vertex ai models
     input_cost_per_token_above_200k_tokens: float | None  # only for vertex ai gemini-2.5-pro models
+    input_cost_per_token_above_100k_tokens: ReadOnly[float | None]
     input_cost_per_token_above_200k_tokens_priority: float | None
     input_cost_per_token_above_272k_tokens: float | None  # GPT-5.4/5.4-pro: prompts >272K priced at 2x input
     input_cost_per_token_above_272k_tokens_priority: float | None
@@ -337,9 +354,11 @@ class ModelInfoBase(ProviderSpecificModelInfo, total=False):
     input_cost_per_token_batches: float | None
     input_cost_per_video_token_batches: ReadOnly[float | None]
     input_cost_per_token_above_200k_tokens_batches: ReadOnly[float | None]
+    input_cost_per_token_above_100k_tokens_batches: ReadOnly[float | None]
     input_cost_per_token_above_272k_tokens_batches: ReadOnly[float | None]
     output_cost_per_token_batches: float | None
     output_cost_per_token_above_200k_tokens_batches: ReadOnly[float | None]
+    output_cost_per_token_above_100k_tokens_batches: ReadOnly[float | None]
     output_cost_per_token_above_272k_tokens_batches: ReadOnly[float | None]
     output_cost_per_token: Required[float | None]
     output_cost_per_token_flex: float | None  # OpenAI flex service tier pricing
@@ -359,6 +378,7 @@ class ModelInfoBase(ProviderSpecificModelInfo, total=False):
     output_cost_per_audio_token: float | None
     output_cost_per_token_above_128k_tokens: float | None  # only for vertex ai models
     output_cost_per_token_above_200k_tokens: float | None  # only for vertex ai gemini-2.5-pro models
+    output_cost_per_token_above_100k_tokens: ReadOnly[float | None]
     output_cost_per_token_above_200k_tokens_priority: float | None
     output_cost_per_token_above_272k_tokens: float | None  # GPT-5.4/5.4-pro: prompts >272K priced at 1.5x output
     output_cost_per_token_above_272k_tokens_priority: float | None
@@ -397,6 +417,7 @@ class ModelInfoBase(ProviderSpecificModelInfo, total=False):
     web_search_billing_unit: (
         Literal["per_query", "per_prompt"] | None
     )  # "per_query" (Gemini 3.x) or "per_prompt" (Gemini 2.x)
+    search_free_requests: ReadOnly[SearchFreeRequests | None]
     google_maps_grounding_cost_per_query: ReadOnly[float | None]
     citation_cost_per_token: float | None  # Cost per citation token for Perplexity
     tiered_pricing: list[dict[str, Any]] | None  # Tiered pricing structure for models like Dashscope
@@ -3750,6 +3771,8 @@ class CustomPricingLiteLLMParams(MirroredPricingParams):
     input_cost_per_token_balanced: float | None = None
     input_cost_per_token_ultrafast: float | None = None
     cache_creation_input_token_cost_above_1hr: float | None = None
+    cache_creation_input_token_cost_above_100k_tokens: float | None = None
+    cache_creation_input_token_cost_above_1hr_above_100k_tokens: float | None = None
     cache_creation_input_token_cost_above_200k_tokens: float | None = None
     cache_creation_input_token_cost_above_272k_tokens: float | None = None
     cache_creation_input_token_cost_above_272k_tokens_priority: float | None = None
@@ -3763,15 +3786,18 @@ class CustomPricingLiteLLMParams(MirroredPricingParams):
     cache_read_input_token_cost_priority: float | None = None
     cache_read_input_token_cost_balanced: float | None = None
     cache_read_input_token_cost_ultrafast: float | None = None
+    cache_read_input_token_cost_above_100k_tokens: float | None = None
     cache_read_input_token_cost_above_200k_tokens: float | None = None
     cache_read_input_token_cost_above_200k_tokens_priority: float | None = None
     cache_read_input_token_cost_above_272k_tokens_priority: float | None = None
     cache_read_input_token_cost_above_272k_tokens_flex: float | None = None
     cache_read_input_token_cost_above_272k_tokens_ultrafast: float | None = None
     cache_read_input_token_cost_batches: float | None = None
+    cache_read_input_token_cost_above_100k_tokens_batches: float | None = None
     cache_read_input_token_cost_above_200k_tokens_batches: float | None = None
     cache_read_input_token_cost_above_272k_tokens_batches: float | None = None
     cache_creation_input_token_cost_batches: float | None = None
+    cache_creation_input_token_cost_above_100k_tokens_batches: float | None = None
     cache_creation_input_token_cost_above_200k_tokens_batches: float | None = None
     cache_creation_input_token_cost_above_272k_tokens_batches: float | None = None
     cache_read_input_audio_token_cost: float | None = None
@@ -3780,12 +3806,14 @@ class CustomPricingLiteLLMParams(MirroredPricingParams):
     input_cost_per_audio_token: float | None = None
     input_cost_per_token_cache_hit: float | None = None
     input_cost_per_token_above_128k_tokens: float | None = None
+    input_cost_per_token_above_100k_tokens: float | None = None
     input_cost_per_token_above_200k_tokens: float | None = None
     input_cost_per_token_above_200k_tokens_priority: float | None = None
     input_cost_per_token_above_272k_tokens_priority: float | None = None
     input_cost_per_token_above_272k_tokens_flex: float | None = None
     input_cost_per_token_above_272k_tokens_ultrafast: float | None = None
     input_cost_per_token_above_200k_tokens_batches: float | None = None
+    input_cost_per_token_above_100k_tokens_batches: float | None = None
     input_cost_per_token_above_272k_tokens_batches: float | None = None
     input_cost_per_query: float | None = None
     input_cost_per_image: float | None = None
@@ -3807,12 +3835,14 @@ class CustomPricingLiteLLMParams(MirroredPricingParams):
     output_cost_per_token_ultrafast: float | None = None
     output_cost_per_audio_token: float | None = None
     output_cost_per_token_above_128k_tokens: float | None = None
+    output_cost_per_token_above_100k_tokens: float | None = None
     output_cost_per_token_above_200k_tokens: float | None = None
     output_cost_per_token_above_200k_tokens_priority: float | None = None
     output_cost_per_token_above_272k_tokens_priority: float | None = None
     output_cost_per_token_above_272k_tokens_flex: float | None = None
     output_cost_per_token_above_272k_tokens_ultrafast: float | None = None
     output_cost_per_token_above_200k_tokens_batches: float | None = None
+    output_cost_per_token_above_100k_tokens_batches: float | None = None
     output_cost_per_token_above_272k_tokens_batches: float | None = None
     output_cost_per_character_above_128k_tokens: float | None = None
     output_cost_per_image: float | None = None
@@ -3858,10 +3888,13 @@ class CustomPricingLiteLLMParams(MirroredPricingParams):
 
 DEPLOYMENT_SCOPED_PRICING_FIELDS: Final[frozenset[str]] = frozenset({"off_peak_pricing"})
 
+DEPLOYMENT_SCOPED_TOKEN_COUNT_FIELDS: Final[frozenset[str]] = frozenset({"token_count_framing", "token_count_model"})
+
 SHARED_BACKEND_MODEL_INFO_FIELDS: Final[frozenset[str]] = (
     frozenset(ModelInfoBase.__required_keys__ | ModelInfoBase.__optional_keys__)
     - frozenset(CustomPricingLiteLLMParams.model_fields)
     - DEPLOYMENT_SCOPED_PRICING_FIELDS
+    - DEPLOYMENT_SCOPED_TOKEN_COUNT_FIELDS
 )
 
 
@@ -3876,7 +3909,7 @@ def shared_backend_model_info(model_info: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in model_info.items() if k in SHARED_BACKEND_MODEL_INFO_FIELDS}
 
 
-ABOVE_THRESHOLD_COST_KEY_PATTERN: Final = re.compile(r"_above_\d+k?_tokens$")
+ABOVE_THRESHOLD_COST_KEY_PATTERN: Final = re.compile(r"_above_\d+k?_tokens(?:_batches)?$")
 
 _PRICING_FIELD_EXEMPTIONS: Final[frozenset[str]] = frozenset({"output_vector_size"})
 
@@ -4258,11 +4291,15 @@ class LiteLLMLoggingBaseClass:
         pass
 
 
+TokenCountMessagesFormat: TypeAlias = Literal["openai", "anthropic"]
+
+
 class TokenCountResponse(LiteLLMPydanticObjectBase):
     total_tokens: int
     request_model: str
     model_used: str
     tokenizer_type: str
+    count_source: TokenCountSource | None = None
     original_response: dict | None = None
     """
     Original Response from upstream API call - if an API call was made for token counting
@@ -4273,6 +4310,7 @@ class TokenCountResponse(LiteLLMPydanticObjectBase):
     HTTP status code from the token counting API (e.g., 200 for success, 429 for rate limit, 400 for bad request)
     """
     status_code: int | None = None
+    rejected_before_provider_call: bool = Field(default=False, exclude=True)
 
 
 class CustomHuggingfaceTokenizer(TypedDict):
