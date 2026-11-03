@@ -6,7 +6,9 @@ Format: vid_{base64_encoded_string}
 """
 
 import base64
-from typing import Final
+from collections.abc import Mapping
+from types import MappingProxyType
+from typing import Final, cast
 
 from litellm._logging import verbose_logger
 from litellm.types.utils import SpecialEnums
@@ -28,9 +30,13 @@ PROVIDER_RESPONSE_KEY: Final = "provider_response"
 # the provider's own task id, plain, which the cost poller writes onto the finish log row.
 PROVIDER_TASK_ID_KEY: Final = "provider_task_id"
 
+# Request metadata key the proxy's video create sets to the dollars it held against the caller's
+# budgets (video_budget_hold.py). The create log row shows it beside the provider task id.
+VIDEO_ESTIMATED_COST_KEY: Final = "video_estimated_cost"
+
 
 def stamp_provider_task_id(logging_obj: object, task_id: str) -> None:
-    """Show the provider's task id in the log row's metadata, next to what the caller sent.
+    """Show the provider's task id, and on a create the budget hold's estimate, in the log row's metadata.
 
     The caller's video id hides it inside an encoded string. spend_logs_metadata is the one
     free-form key the spend log keeps. Merging, not replacing, keeps what the caller put there.
@@ -49,10 +55,28 @@ def stamp_provider_task_id(logging_obj: object, task_id: str) -> None:
         metadata = {}
         params[bucket] = metadata
     existing: Final[object] = metadata.get("spend_logs_metadata")
+    estimate: Final = _estimated_cost(logging_obj)
     metadata["spend_logs_metadata"] = {
         **(existing if isinstance(existing, dict) else {}),
         PROVIDER_TASK_ID_KEY: task_id,
+        **({VIDEO_ESTIMATED_COST_KEY: estimate} if estimate is not None else {}),
     }
+
+
+def _estimated_cost(logging_obj: object) -> float | None:
+    details: Final[object] = getattr(logging_obj, "model_call_details", None)
+    params: Final = _mapping(_mapping(details).get("litellm_params"))
+    # The proxy sets it on the request's metadata; a router call keeps its own keys in litellm_metadata.
+    values: Final = (
+        _mapping(params.get(name)).get(VIDEO_ESTIMATED_COST_KEY) for name in ("metadata", "litellm_metadata")
+    )
+    return next((value for value in values if isinstance(value, float)), None)
+
+
+def _mapping(value: object) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        return MappingProxyType({})
+    return cast("Mapping[str, object]", value)  # cast-ok: logging params are untyped
 
 
 class DecodedCharacterId(dict):

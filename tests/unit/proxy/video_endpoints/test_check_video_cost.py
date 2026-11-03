@@ -26,7 +26,7 @@ from litellm.proxy.video_endpoints.utils import encode_video_id_in_response
 from litellm.router import Router
 from litellm.types.utils import BACKGROUND_VIDEO_COST_POLL_CALL_ORIGIN
 from litellm.types.videos.main import VideoObject
-from litellm.types.videos.utils import VIDEO_COST_POLL_ID_KEY, encode_video_id_with_provider
+from litellm.types.videos.utils import VIDEO_COST_POLL_ID_KEY, VIDEO_ESTIMATED_COST_KEY, encode_video_id_with_provider
 
 MINIMAX_CREATE = "https://api.minimax.io/v2/video_generation"
 MINIMAX_STATUS = "https://api.minimax.io/v2/query/video_generation/mm-task"
@@ -455,6 +455,24 @@ class TestBilledWhenTheJobFinishes:
         assert billed.usage["provider_response"] == status[1]
         # Spend logs keep usage extras even with prompt and response storage off.
         assert kwargs["standard_logging_object"]["metadata"]["usage_object"]["provider_response"] == status[1]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("model", "params", "create", "status", "cost"), PROVIDER_CASES)
+    async def test_the_create_row_shows_the_budget_hold_estimate_and_the_finish_row_its_real_cost(
+        self, stack: Stack, model: str, params: dict, create: tuple, status: tuple, cost: float
+    ) -> None:
+        stack.providers.reply("POST", *create)
+        stack.providers.reply("GET", *status)
+
+        await stack.create(model, **params, metadata={VIDEO_ESTIMATED_COST_KEY: 12.5})
+        await stack.poll(cycles=2)
+
+        ((create_kwargs, _created),) = stack.spend.create_charges()
+        ((poll_kwargs, _billed),) = stack.spend.poll_charges()
+        create_metadata = create_kwargs["standard_logging_object"]["metadata"]["spend_logs_metadata"]
+        assert create_metadata[VIDEO_ESTIMATED_COST_KEY] == 12.5
+        assert VIDEO_ESTIMATED_COST_KEY not in poll_kwargs["standard_logging_object"]["metadata"]["spend_logs_metadata"]
+        assert poll_kwargs["standard_logging_object"]["response_cost"] == pytest.approx(cost)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(("model", "params", "create", "status", "cost"), PROVIDER_CASES)
