@@ -12,15 +12,20 @@ The caller's own status checks and downloads never bill (NON_INFERENCE_CALL_TYPE
 does not depend on the caller polling, or on how often. Every path that leaves a job unbilled
 logs an error and sends a failed-tracking alert.
 
+Each pending row also stores the create-time price estimate (PollRecord.estimated_cost) that
+video_budget_hold.py holds against the creator's key and Team budgets; unbilled_video_estimate sums
+the estimates of jobs not yet billed. Billing still uses only what the provider reports.
+
 The finish spend row's request id is the video id plus _video_cost, so it is not dropped as a
 duplicate of the create row. Its start and end are the job's lifetime, which is what the logs
 page shows as Duration. Its model field is the deployment wire model (litellm_params.model),
 same as the create row, not the provider status payload's model name.
 
-Callers: the /videos create endpoint (record_pending_video_job) and
-ProxyStartupEvent.initialize_scheduled_background_jobs (CheckVideoCost).
+Callers: the /videos create endpoint (record_pending_video_job), video_budget_hold.py
+(unbilled_video_estimate), and ProxyStartupEvent.initialize_scheduled_background_jobs (CheckVideoCost).
 """
 
+import math
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
@@ -58,6 +63,8 @@ TERMINAL_VIDEO_JOB_STATUSES: Final = ("completed", "failed", "stale_expired")
 # A finished job bills whatever its provider reported, so a provider that charges
 # for a failed or cancelled job is still billed.
 PROVIDER_FINISHED_VIDEO_STATUSES: Final = frozenset({"completed", "failed", "cancelled", "expired"})
+# More unbilled jobs than this for one key or Team is far past any budget; the newest are summed.
+UNBILLED_ESTIMATE_LOOKUP_LIMIT: Final = 1000
 
 
 class VideoCostAlerts(Protocol):
@@ -108,6 +115,8 @@ class PollRecord(BaseModel):
     # The creator's spend metadata, captured at create so a later rename or
     # key rotation cannot move the charge.
     metadata: Mapping[str, object] = Field(default_factory=lambda: MappingProxyType({}))
+    # Dollars held against the creator's budgets until the job is billed. None on rows from before holds.
+    estimated_cost: float | None = None
 
 
 async def _alert(alerts: VideoCostAlerts, message: str, model: str = "") -> None:
@@ -166,6 +175,7 @@ def _pending_row(
     poll_id: str,
     user_api_key_dict: "UserAPIKeyAuth",
     request_data: Mapping[str, object],
+    estimated_cost: float | None,
 ) -> Mapping[str, object]:
     decoded: Final = decode_video_id_with_provider(video_id)
     provider: Final = decoded.get("custom_llm_provider")
@@ -177,6 +187,7 @@ def _pending_row(
         custom_llm_provider=provider,
         model_id=model_id,
         metadata=_creator_identity(user_api_key_dict, _request_tags(request_data)),
+        estimated_cost=estimated_cost,
     )
     status: Final[object] = getattr(response, "status", None)
     return {  # mutable-ok: prisma's query builder rejects a Mapping
@@ -201,8 +212,9 @@ async def record_pending_video_job(
     request_data: Mapping[str, object],
     prisma_client: "PrismaClient | None",
     alerts: VideoCostAlerts,
+    estimated_cost: float | None = None,
 ) -> None:
-    """Store a created job for CheckVideoCost to bill.
+    """Store a created job for CheckVideoCost to bill, with the estimate held against its creator's budgets.
 
     Never raises: the provider has already accepted the job, and failing the response
     now would still bill nobody and would lose the caller its video id.
@@ -219,10 +231,31 @@ async def record_pending_video_job(
         verbose_proxy_logger.warning("CheckVideoCost: no database, so video %s will not be billed", video_id)
         return
     try:
-        row: Final = _pending_row(response, video_id, poll_id, user_api_key_dict, request_data)
+        row: Final = _pending_row(response, video_id, poll_id, user_api_key_dict, request_data, estimated_cost)
         await _video_jobs(prisma_client).create(data=row)
     except Exception as e:
         await _alert(alerts, _unbilled(video_id, f"it could not be recorded: {e}"))
+
+
+async def unbilled_video_estimate(prisma_client: "PrismaClient", owner: Mapping[str, str]) -> float:
+    """Dollars estimated for this owner's video jobs not yet billed. owner is a team_id or api_key filter.
+
+    A job stops counting once the poller claims it (batch_processed), which is when its spend is written.
+    """
+    jobs: Final = await _video_jobs(prisma_client).find_many(
+        where={  # mutable-ok: prisma's query builder rejects a Mapping
+            **owner,
+            "file_purpose": VIDEO_FILE_PURPOSE,
+            "batch_processed": False,
+        },
+        take=UNBILLED_ESTIMATE_LOOKUP_LIMIT,
+        order={"created_at": "desc"},  # mutable-ok: prisma's query builder rejects a Mapping
+    )
+    records: Final = (_poll_record(job) for job in jobs)
+    estimates: Final = (record.estimated_cost for record in records if record is not None)
+    return math.fsum(
+        estimate for estimate in estimates if estimate is not None and math.isfinite(estimate) and estimate > 0
+    )
 
 
 def _poll_record(job: _VideoJobRow) -> PollRecord | None:

@@ -27,6 +27,13 @@ from litellm.proxy.video_endpoints.utils import (
     get_custom_provider_from_data,
     video_reference_to_id,
 )
+from litellm.proxy.video_endpoints.video_budget_hold import (
+    VideoBudgetHold,
+    hold_video_budget,
+    metadata_with_estimate,
+    raise_video_budget_refusal,
+    video_budget_locks,
+)
 from litellm.types.videos.utils import (
     decode_character_id_with_provider,
     decode_video_id_with_provider,
@@ -95,32 +102,45 @@ async def video_generation(
     # Process request using ProxyBaseLLMRequestProcessing
     processor: Final = ProxyBaseLLMRequestProcessing(data=data)
     try:
-        generated: Final[object] = await processor.base_process_llm_request(
-            request=request,
-            fastapi_response=fastapi_response,
-            user_api_key_dict=user_api_key_dict,
-            route_type="avideo_generation",
-            proxy_logging_obj=proxy_logging_obj,
-            llm_router=llm_router,
-            general_settings=general_settings,
-            proxy_config=proxy_config,
-            select_data_generator=select_data_generator,
-            model=None,
-            user_model=user_model,
-            user_temperature=user_temperature,
-            user_request_timeout=user_request_timeout,
-            user_max_tokens=user_max_tokens,
-            user_api_base=user_api_base,
-            version=version,
-        )
-        encoded_response: Final[object] = encode_video_id_in_response(generated)
-        await record_pending_video_job(
-            encoded_response,
-            user_api_key_dict,
-            processor.data,  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]  # data is a bare dict upstream
-            prisma_client,
-            proxy_logging_obj,
-        )
+        async with video_budget_locks(user_api_key_dict):
+            hold: Final = await hold_video_budget(
+                user_api_key_dict,
+                data,  # pyright: ignore[reportUnknownArgumentType]  # data is a bare dict upstream
+                llm_router,
+                prisma_client,
+            )
+            if not isinstance(hold, VideoBudgetHold):
+                raise_video_budget_refusal(hold)
+            metadata: Final = metadata_with_estimate(data.get("metadata"), hold)
+            if metadata is not None:
+                data["metadata"] = dict(metadata)
+            generated: Final[object] = await processor.base_process_llm_request(
+                request=request,
+                fastapi_response=fastapi_response,
+                user_api_key_dict=user_api_key_dict,
+                route_type="avideo_generation",
+                proxy_logging_obj=proxy_logging_obj,
+                llm_router=llm_router,
+                general_settings=general_settings,
+                proxy_config=proxy_config,
+                select_data_generator=select_data_generator,
+                model=None,
+                user_model=user_model,
+                user_temperature=user_temperature,
+                user_request_timeout=user_request_timeout,
+                user_max_tokens=user_max_tokens,
+                user_api_base=user_api_base,
+                version=version,
+            )
+            encoded_response: Final[object] = encode_video_id_in_response(generated)
+            await record_pending_video_job(
+                encoded_response,
+                user_api_key_dict,
+                processor.data,  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]  # data is a bare dict upstream
+                prisma_client,
+                proxy_logging_obj,
+                estimated_cost=hold.estimated_cost,
+            )
     except Exception as e:
         raise await processor.handle_llm_api_exception(
             e=e,
