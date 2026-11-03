@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, File, Form, Request, Response, UploadFil
 from fastapi.responses import ORJSONResponse
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
+from litellm.llms.base_llm.managed_resources.isolation import can_access_resource
 from litellm.proxy._types import *
 from litellm.proxy.auth.user_api_key_auth import UserAPIKeyAuth, user_api_key_auth
 from litellm.proxy.common_request_processing import ProxyBaseLLMRequestProcessing
@@ -19,7 +20,7 @@ from litellm.proxy.common_utils.openai_endpoint_utils import (
     get_custom_llm_provider_from_request_query,
 )
 from litellm.proxy.image_endpoints.endpoints import batch_to_bytesio
-from litellm.proxy.video_endpoints.check_video_cost import record_pending_video_job
+from litellm.proxy.video_endpoints.check_video_cost import find_video_job_owner, record_pending_video_job
 from litellm.proxy.video_endpoints.utils import (
     encode_character_id_in_response,
     encode_video_id_in_response,
@@ -40,6 +41,28 @@ from litellm.types.videos.utils import (
 )
 
 router: Final = APIRouter()
+
+
+async def _refuse_unowned_video(video_id: str, user_api_key_dict: UserAPIKeyAuth) -> None:
+    """Refuse a video the caller may not see, as if it did not exist.
+
+    The provider answers for any id with the deployment's own account, so the only owner check is
+    the job row the create endpoint stored. A caller may see a video they made, one their Team made,
+    or any video as a proxy admin. An id with no row is refused too: every adapter on these routes
+    stores one, so a missing row means nobody can show the video is theirs. With no database there
+    are no rows and no Teams to keep apart, so nothing is refused.
+    """
+    from litellm.proxy.proxy_server import prisma_client
+
+    if prisma_client is None:
+        return
+    owner: Final = await find_video_job_owner(prisma_client, video_id)
+    if owner is None or not can_access_resource(
+        user_api_key_dict=user_api_key_dict,
+        created_by=owner.created_by,
+        resource_team_id=owner.team_id,
+    ):
+        raise ProxyException(message="Video not found", type="not_found_error", param="video_id", code=404)
 
 
 @router.post(
@@ -283,6 +306,8 @@ async def video_status(
         version,
     )
 
+    await _refuse_unowned_video(video_id, user_api_key_dict)
+
     # Create data with video_id
     data: Final[dict[str, object]] = {"video_id": video_id}
 
@@ -383,6 +408,8 @@ async def video_content(
         user_temperature,
         version,
     )
+
+    await _refuse_unowned_video(video_id, user_api_key_dict)
 
     # Create data with video_id
     data: Final[dict[str, object]] = {"video_id": video_id}
@@ -491,6 +518,8 @@ async def video_remix(
         user_temperature,
         version,
     )
+
+    await _refuse_unowned_video(video_id, user_api_key_dict)
 
     data: Final = await read_request_body(request=request)
     data["video_id"] = video_id
