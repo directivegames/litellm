@@ -10181,9 +10181,9 @@ class ProviderConfigManager:
 
             return get_hosted_vllm_video_config(model)
         elif LlmProviders.MINIMAX == provider:
-            from litellm.llms.minimax.videos.transformation import MinimaxVideoConfig
+            from litellm.llms.minimax.videos.deployment_priced import DeploymentPricedMinimaxVideoConfig
 
-            return MinimaxVideoConfig()
+            return DeploymentPricedMinimaxVideoConfig()
         elif LlmProviders.EDENAI == provider:
             return litellm.EdenAIVideoConfig()
         elif LlmProviders.BYTEPLUS == provider:

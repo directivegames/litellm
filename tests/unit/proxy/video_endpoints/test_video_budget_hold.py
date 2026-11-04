@@ -12,6 +12,7 @@ from typing import Final
 
 import pytest
 
+from litellm.llms.minimax.videos.deployment_priced import REFERENCE_VIDEO_LONGEST_SECONDS
 from litellm.proxy._types import UserAPIKeyAuth
 from litellm.proxy.video_endpoints.check_video_cost import record_pending_video_job, unbilled_video_estimate
 from litellm.proxy.video_endpoints.video_budget_hold import (
@@ -35,6 +36,16 @@ MINIMAX: Final = {
     "model_name": "minimax/hailuo-3",
     "litellm_params": {"model": "minimax/MiniMax-H3", "api_key": "mm-key"},
     "model_info": {"id": "mm-dep", "mode": "video_generation", MAX_COST_PER_VIDEO_JOB_KEY: 2.5},
+}
+MINIMAX_PRICED: Final = {
+    "model_name": "minimax/hailuo-3",
+    "litellm_params": {
+        "model": "minimax/MiniMax-H3",
+        "api_key": "mm-key",
+        "input_cost_per_video_per_second_768p": 0.08,
+        "input_cost_per_video_per_second_2k": 0.13,
+    },
+    "model_info": {"id": "mm-priced", "mode": "video_generation"},
 }
 SEEDANCE: Final = {
     "model_name": "bytedance/seedance-2.5",
@@ -113,6 +124,21 @@ class TestEstimate:
         estimate: Final = estimate_video_job_cost({"resolution": "768p", "duration": 6}, (_deployment(MINIMAX),))
 
         assert estimate == Decimal(0), "upstream's MiniMax adapter bills at create, so nothing is left to hold"
+
+    def test_a_minimax_reference_video_holds_minimaxs_longest_reference_at_the_requested_resolution(self) -> None:
+        deployments: Final = (_deployment(MINIMAX_PRICED),)
+
+        at_768p: Final = estimate_video_job_cost({"resolution": "768P", "content": [INPUT_VIDEO]}, deployments)
+        unnamed: Final = estimate_video_job_cost({"content": [INPUT_VIDEO]}, deployments)
+
+        assert at_768p == REFERENCE_VIDEO_LONGEST_SECONDS * Decimal("0.08")
+        assert unnamed == REFERENCE_VIDEO_LONGEST_SECONDS * Decimal("0.13"), "no resolution holds the dearest"
+
+    def test_a_minimax_reference_video_with_no_rate_has_no_estimate_unless_a_ceiling_is_set(self) -> None:
+        unpriced: Final = {**MINIMAX, "model_info": {"id": "mm-dep", "mode": "video_generation"}}
+
+        assert estimate_video_job_cost({"content": [INPUT_VIDEO]}, (_deployment(unpriced),)) is None
+        assert estimate_video_job_cost({"content": [INPUT_VIDEO]}, (_deployment(MINIMAX),)) == Decimal("2.5")
 
     def test_seedance_grows_with_the_seconds_and_counts_an_input_video_at_its_own_rate(self) -> None:
         deployments: Final = (_deployment(SEEDANCE),)

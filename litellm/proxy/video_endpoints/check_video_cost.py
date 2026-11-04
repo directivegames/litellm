@@ -8,9 +8,10 @@ the job and the identity that created it in LiteLLM_ManagedObjectTable with file
 longest ago, and bills each finished one exactly once, to the key that created it. A job that
 ends without a reported cost closes unbilled.
 
-An adapter that bills at create, such as upstream's MiniMax adapter, leaves no mark. Its job is
-stored already billed (batch_processed), only as the record of who made it, so the poller and
-unbilled_video_estimate skip it.
+An adapter that bills the whole job at create leaves no mark. Its job is stored already billed
+(batch_processed), only as the record of who made it, so the poller and unbilled_video_estimate skip
+it. MiniMax bills at create too, but marks a job with a reference video, whose seconds MiniMax reports
+only when it finishes. The poller bills those seconds alone on the finish row.
 
 The caller's own status checks and downloads never bill (NON_INFERENCE_CALL_TYPES), so spend
 does not depend on the caller polling, or on how often. Every path that leaves a job unbilled
@@ -382,7 +383,9 @@ def _poller_litellm_params(
     """
     from litellm.types.router import GenericLiteLLMParams
 
-    merged: dict[str, object] = dict(deployment.litellm_params.model_dump(exclude_none=True))  # mutable-ok: pydantic input
+    merged: dict[str, object] = dict(
+        deployment.litellm_params.model_dump(exclude_none=True)
+    )  # mutable-ok: pydantic input
     merged.update(credentials)
     merged["model"] = deployment.litellm_params.model
     merged["model_info"] = deployment.model_info.model_dump(exclude_none=True)
@@ -636,7 +639,9 @@ def _without_link_signatures(value: object) -> object:
         return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
     if isinstance(value, Mapping):
         mapping: Final = cast(Mapping[object, object], value)
-        return {key: _without_link_signatures(item) for key, item in mapping.items()}  # mutable-ok: serialized into the spend log
+        return {
+            key: _without_link_signatures(item) for key, item in mapping.items()
+        }  # mutable-ok: serialized into the spend log
     if isinstance(value, list | tuple):
         items: Final = cast(Sequence[object], value)
         return [_without_link_signatures(item) for item in items]  # mutable-ok: serialized into the spend log

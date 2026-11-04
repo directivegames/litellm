@@ -6,8 +6,10 @@ prices the request at the most expensive deployment its model name can route to,
 the caller's jobs not yet billed, and refuses when that would pass a max budget. The estimate is stored
 on the pending job (PollRecord.estimated_cost) and, through metadata_with_estimate, on the create log row.
 
-A MiniMax deployment holds nothing: upstream's MiniMax adapter bills the job at create, so its spend already
-counts. For any other deployment the estimate is model_info.max_cost_per_video_job when set. Otherwise
+A MiniMax job bills its output and images at create, so that spend already counts and holds nothing. Only its
+reference video is billed at the end: a create with one holds model_info.max_cost_per_video_job when set, else
+MiniMax's longest total reference length at the deployment's reference-video rate for the resolution. For any
+other deployment the estimate is model_info.max_cost_per_video_job when set. Otherwise
 BytePlus Seedance is its published token count, (input video seconds + output seconds) x width x height x
 24 fps / 1024, at the widest frame for the resolution, counting an input video as long as the output. Other
 providers have no estimate.
@@ -35,6 +37,12 @@ from pydantic import ValidationError
 import litellm
 from litellm.llms.base_llm.videos.deployment_model_info import deployment_pricing_model_info
 from litellm.llms.byteplus.videos.transformation import RATE_KEYS, seedance_input_kind, seedance_rate
+from litellm.llms.minimax.videos.deployment_priced import (
+    REFERENCE_VIDEO_LONGEST_SECONDS,
+    REFERENCE_VIDEO_RATE_KEY,
+    reference_video_items,
+    reference_video_rate,
+)
 from litellm.proxy._types import ProxyException
 from litellm.proxy.video_endpoints.check_video_cost import unbilled_video_estimate
 from litellm.types.router import Deployment, GenericLiteLLMParams
@@ -250,7 +258,7 @@ def _deployments(llm_router: "Router", model: str, team_id: str | None) -> tuple
 
 def _deployment_estimate(request_data: Mapping[str, object], deployment: Deployment) -> Decimal | None:
     provider: Final = deployment.litellm_params.custom_llm_provider or deployment.litellm_params.model.split("/", 1)[0]
-    if provider in BILLED_AT_CREATE_PROVIDERS:
+    if provider in BILLED_AT_CREATE_PROVIDERS and not reference_video_items(request_data.get("content")):
         return Decimal(0)
     pricing: Final = deployment_pricing_model_info(
         GenericLiteLLMParams.model_validate(
@@ -265,18 +273,32 @@ def _deployment_estimate(request_data: Mapping[str, object], deployment: Deploym
     ceiling: Final = _dollars(pricing.get(MAX_COST_PER_VIDEO_JOB_KEY))
     if ceiling is not None:
         return ceiling
+    if provider in BILLED_AT_CREATE_PROVIDERS:
+        return _minimax_reference_video_estimate(request_data, pricing)
     if provider == "byteplus":
         return _seedance_estimate(request_data, pricing)
     return None
+
+
+def _minimax_reference_video_estimate(
+    request_data: Mapping[str, object], pricing: Mapping[str, object]
+) -> Decimal | None:
+    # MiniMax reads size as an aspect ratio, so only resolution names the tier.
+    rates: Final = tuple(
+        reference_video_rate(pricing, resolution)
+        for resolution in _resolutions(request_data.get("resolution"), pricing, REFERENCE_VIDEO_RATE_KEY)
+    )
+    return max((REFERENCE_VIDEO_LONGEST_SECONDS * rate for rate in rates if rate is not None), default=None)
 
 
 def _seedance_estimate(request_data: Mapping[str, object], pricing: Mapping[str, object]) -> Decimal | None:
     kind: Final = seedance_input_kind(dict(request_data)) or "plain"
     seconds: Final = _seconds(request_data, SEEDANCE_LONGEST_SECONDS)
     billed_seconds: Final = seconds * 2 if kind == "video" else seconds
+    requested: Final = request_data.get("resolution", request_data.get("size"))
     costs: Final = tuple(
         _seedance_cost(pricing, kind, resolution, billed_seconds)
-        for resolution in _resolutions(request_data, pricing, RATE_KEYS[kind])
+        for resolution in _resolutions(requested, pricing, RATE_KEYS[kind])
     )
     return max((cost for cost in costs if cost is not None), default=None)
 
@@ -293,11 +315,8 @@ def _seedance_cost(pricing: Mapping[str, object], kind: str, resolution: str, se
     return seconds * pixels * SEEDANCE_FRAMES_PER_SECOND / SEEDANCE_PIXELS_PER_TOKEN * rate
 
 
-def _resolutions(
-    request_data: Mapping[str, object], pricing: Mapping[str, object], key_pattern: str
-) -> tuple[str, ...]:
-    """The request's resolution, or every resolution the deployment prices when it names none."""
-    requested: Final = request_data.get("resolution", request_data.get("size"))
+def _resolutions(requested: object, pricing: Mapping[str, object], key_pattern: str) -> tuple[str, ...]:
+    """The requested resolution, or every resolution the deployment prices when the request names none."""
     if isinstance(requested, str) and requested.strip():
         return (requested.strip().lower(),)
     prefix: Final = key_pattern.format("")

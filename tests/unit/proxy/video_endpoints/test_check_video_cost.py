@@ -29,6 +29,7 @@ from litellm.types.videos.main import VideoObject
 from litellm.types.videos.utils import VIDEO_COST_POLL_ID_KEY, VIDEO_ESTIMATED_COST_KEY, encode_video_id_with_provider
 
 MINIMAX_CREATE = "https://api.minimax.io/v2/video_generation"
+MINIMAX_STATUS = "https://api.minimax.io/v2/query/video_generation/mm-task"
 BYTEPLUS_CREATE = "https://ark.ap-southeast.bytepluses.com/api/v3/contents/generations/tasks"
 BYTEPLUS_STATUS = "https://ark.ap-southeast.bytepluses.com/api/v3/contents/generations/tasks/cgt-1"
 OPENROUTER_CREATE = "https://openrouter.ai/api/v1/videos"
@@ -477,9 +478,7 @@ class TestBilledWhenTheJobFinishes:
             assert metadata["spend_logs_metadata"] == {"provider_task_id": task_id}
 
     @pytest.mark.asyncio
-    async def test_a_failed_job_that_reports_no_usage_closes_without_a_charge_or_an_alert(
-        self, stack: Stack
-    ) -> None:
+    async def test_a_failed_job_that_reports_no_usage_closes_without_a_charge_or_an_alert(self, stack: Stack) -> None:
         stack.providers.reply("POST", BYTEPLUS_CREATE, {"id": "cgt-1"})
         stack.providers.reply("GET", BYTEPLUS_STATUS, {**_byteplus_task(status="failed"), "usage": {}})
 
@@ -615,13 +614,46 @@ class TestJobsBilledAtCreate:
         await stack.poll(cycles=2)
 
         ((create_kwargs, _created),) = stack.spend.create_charges()
-        assert create_kwargs["response_cost"] == pytest.approx(5 * 0.08), "upstream's adapter bills 5 s at 768p at create"
+        assert create_kwargs["response_cost"] == pytest.approx(5 * 0.08), (
+            "upstream's adapter bills 5 s at 768p at create"
+        )
         assert stack.spend.poll_charges() == []
         assert stack.providers.seen == [("POST", MINIMAX_CREATE)], "the poller must never ask MiniMax about the job"
         (row,) = stack.table.rows
         assert (row.unified_object_id, row.created_by, row.team_id) == (video.id, "user-1", "team-1")
         assert row.batch_processed is True
         assert await check_video_cost.unbilled_video_estimate(stack.prisma, {"team_id": "team-1"}) == 0.0
+        assert stack.alerts.messages == []
+
+    @pytest.mark.asyncio
+    async def test_a_minimax_reference_video_bills_its_output_at_create_and_its_input_seconds_at_the_end(
+        self, stack: Stack
+    ) -> None:
+        stack.providers.reply("POST", MINIMAX_CREATE, {"task_id": "mm-task"})
+        stack.providers.reply(
+            "GET",
+            MINIMAX_STATUS,
+            {
+                "task": {
+                    "id": "mm-task",
+                    "status": "succeeded",
+                    "resolution": "768P",
+                    "usage": {"input_seconds": 7, "output_seconds": 5},
+                }
+            },
+        )
+
+        video = await stack.create("minimax/hailuo-3", duration=5, resolution="768P", content=[INPUT_VIDEO])
+        await stack.poll(cycles=2)
+
+        ((create_kwargs, _created),) = stack.spend.create_charges()
+        assert create_kwargs["response_cost"] == pytest.approx(5 * 0.08), "the output is billed at create"
+        ((poll_kwargs, billed),) = stack.spend.poll_charges()
+        assert poll_kwargs["response_cost"] == pytest.approx(7 * 0.08), "only the reference seconds are left to bill"
+        assert billed.id == video.id
+        assert poll_kwargs["litellm_params"]["metadata"]["spend_logs_metadata"]["provider_task_id"] == "mm-task"
+        (row,) = stack.table.rows
+        assert (row.status, row.batch_processed, row.created_by) == ("completed", True, "user-1")
         assert stack.alerts.messages == []
 
 
