@@ -22,7 +22,7 @@ import asyncio
 import math
 from collections.abc import Mapping
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Final, cast
+from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import urlparse
 
 import httpx

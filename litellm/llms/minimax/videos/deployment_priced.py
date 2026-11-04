@@ -16,14 +16,14 @@ Upstream's MinimaxVideoConfig bills output seconds and input images at create. T
 """
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from decimal import Decimal
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final
 
 import httpx
 from httpx._types import RequestFiles
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from litellm.exceptions import UnsupportedParamsError
 from litellm.llms.base_llm.videos.deployment_model_info import deployment_pricing_model_info
@@ -54,6 +54,7 @@ REPORTED_COST_KEY: Final = "provider_reported_cost_usd"
 
 _EMPTY: Final[Mapping[str, object]] = MappingProxyType({})
 _PAYLOAD_ADAPTER: Final = TypeAdapter(dict[str, object])
+_ITEMS_ADAPTER: Final = TypeAdapter(tuple[object, ...])
 
 
 class _ReportedTask(BaseModel, frozen=True):
@@ -66,20 +67,25 @@ class _StatusAnswer(BaseModel, frozen=True):
 
 
 def _items(content: object) -> tuple[object, ...]:
-    if not isinstance(content, Sequence) or isinstance(content, (str, bytes)):
+    if isinstance(content, (str, bytes)):
         return ()
-    return tuple(cast("Sequence[object]", content))  # cast-ok: request JSON
+    try:
+        return _ITEMS_ADAPTER.validate_python(content)
+    except ValidationError:
+        return ()
 
 
-def _item_type(item: object) -> object:
-    return (
-        cast("Mapping[str, object]", item).get("type") if isinstance(item, Mapping) else None
-    )  # cast-ok: request JSON
+def _is_reference_video(item: object) -> bool:
+    match item:
+        case {"type": "video_url"}:
+            return True
+        case _:
+            return False
 
 
 def reference_video_items(content: object) -> tuple[object, ...]:
     """The reference videos in a create's content list."""
-    return tuple(item for item in _items(content) if _item_type(item) == "video_url")
+    return tuple(item for item in _items(content) if _is_reference_video(item))
 
 
 def _rate(pricing: Mapping[str, object], key: str) -> Decimal | None:
@@ -157,9 +163,7 @@ class DeploymentPricedMinimaxVideoConfig(MinimaxVideoConfig):
     ) -> tuple[dict[str, object], RequestFiles, str]:  # mutable-ok: BaseVideoConfig contract
         params: Final = video_create_optional_request_params
         references: Final = reference_video_items(params.get("content"))
-        without_references: Final = [  # mutable-ok: upstream's adapter validates a list
-            item for item in _items(params.get("content")) if _item_type(item) != "video_url"
-        ]
+        without_references: Final = [item for item in _items(params.get("content")) if not _is_reference_video(item)]
         upstream_params: Final = {**params, "content": without_references} if references else params
         body, files, url = super().transform_video_create_request(
             model, prompt, api_base, upstream_params, litellm_params, headers

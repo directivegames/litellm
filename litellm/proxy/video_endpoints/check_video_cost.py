@@ -383,9 +383,9 @@ def _poller_litellm_params(
     """
     from litellm.types.router import GenericLiteLLMParams
 
-    merged: dict[str, object] = dict(
+    merged: dict[str, object] = dict(  # mutable-ok: pydantic input
         deployment.litellm_params.model_dump(exclude_none=True)
-    )  # mutable-ok: pydantic input
+    )
     merged.update(credentials)
     merged["model"] = deployment.litellm_params.model
     merged["model_info"] = deployment.model_info.model_dump(exclude_none=True)
@@ -639,9 +639,9 @@ def _without_link_signatures(value: object) -> object:
         return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
     if isinstance(value, Mapping):
         mapping: Final = cast(Mapping[object, object], value)
-        return {
+        return {  # mutable-ok: serialized into the spend log
             key: _without_link_signatures(item) for key, item in mapping.items()
-        }  # mutable-ok: serialized into the spend log
+        }
     if isinstance(value, list | tuple):
         items: Final = cast(Sequence[object], value)
         return [_without_link_signatures(item) for item in items]  # mutable-ok: serialized into the spend log
