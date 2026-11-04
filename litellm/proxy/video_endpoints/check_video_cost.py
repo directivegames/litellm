@@ -1,12 +1,16 @@
 """
 Bills video jobs once the provider finishes them.
 
-No video adapter on these routes bills at create. Each marks the created VideoObject with
+A video adapter that bills when the job finishes marks the created VideoObject with
 VIDEO_COST_POLL_ID_KEY, and the create endpoint calls record_pending_video_job, which stores
 the job and the identity that created it in LiteLLM_ManagedObjectTable with file_purpose
 'video'. CheckVideoCost runs on the proxy scheduler. Each cycle it checks the jobs it checked
 longest ago, and bills each finished one exactly once, to the key that created it. A job that
 ends without a reported cost closes unbilled.
+
+An adapter that bills at create, such as upstream's MiniMax adapter, leaves no mark. Its job is
+stored already billed (batch_processed), only as the record of who made it, so the poller and
+unbilled_video_estimate skip it.
 
 The caller's own status checks and downloads never bill (NON_INFERENCE_CALL_TYPES), so spend
 does not depend on the caller polling, or on how often. Every path that leaves a job unbilled
@@ -163,6 +167,10 @@ def _unbilled(video_id: str, reason: str) -> str:
     return f"CheckVideoCost: video {video_id} will not be billed: {reason}"
 
 
+def _unowned(video_id: str, reason: str) -> str:
+    return f"CheckVideoCost: video {video_id} has no owner record, so its status and download are refused: {reason}"
+
+
 def _creator_identity(user_api_key_dict: "UserAPIKeyAuth", request_tags: Sequence[str]) -> Mapping[str, object]:
     """The spend metadata the create request itself would have billed under."""
     fields: Final = (
@@ -221,7 +229,6 @@ def _pending_row(
         metadata=_creator_identity(user_api_key_dict, _request_tags(request_data)),
         estimated_cost=estimated_cost,
     )
-    status: Final[object] = getattr(response, "status", None)
     return {  # mutable-ok: prisma's query builder rejects a Mapping
         "unified_object_id": video_id,
         # Prefixed so a video task id can never match a batch id that
@@ -229,13 +236,38 @@ def _pending_row(
         "model_object_id": f"{VIDEO_FILE_PURPOSE}:{provider}:{poll_id}",
         "file_object": record.model_dump_json(),
         "file_purpose": VIDEO_FILE_PURPOSE,
-        "status": status if isinstance(status, str) and status else "queued",
-        "created_by": user_api_key_dict.user_id,
-        "updated_by": user_api_key_dict.user_id,
-        "team_id": user_api_key_dict.team_id,
-        "org_id": user_api_key_dict.org_id,
-        "api_key": user_api_key_dict.api_key,
+        "status": _job_status(response),
+        **_creator_columns(user_api_key_dict),
     }
+
+
+def _owner_row(response: object, video_id: str, user_api_key_dict: "UserAPIKeyAuth") -> Mapping[str, object]:
+    return {  # mutable-ok: prisma's query builder rejects a Mapping
+        "unified_object_id": video_id,
+        "model_object_id": f"{VIDEO_FILE_PURPOSE}:billed-at-create:{video_id}",
+        "file_object": "{}",
+        "file_purpose": VIDEO_FILE_PURPOSE,
+        "status": _job_status(response),
+        "batch_processed": True,
+        **_creator_columns(user_api_key_dict),
+    }
+
+
+def _job_status(response: object) -> str:
+    status: Final[object] = getattr(response, "status", None)
+    return status if isinstance(status, str) and status else "queued"
+
+
+def _creator_columns(user_api_key_dict: "UserAPIKeyAuth") -> Mapping[str, object]:
+    return MappingProxyType(
+        {
+            "created_by": user_api_key_dict.user_id,
+            "updated_by": user_api_key_dict.user_id,
+            "team_id": user_api_key_dict.team_id,
+            "org_id": user_api_key_dict.org_id,
+            "api_key": user_api_key_dict.api_key,
+        }
+    )
 
 
 async def record_pending_video_job(
@@ -246,27 +278,32 @@ async def record_pending_video_job(
     alerts: VideoCostAlerts,
     estimated_cost: float | None = None,
 ) -> None:
-    """Store a created job for CheckVideoCost to bill, with the estimate held against its creator's budgets.
+    """Store a created job and who made it: for CheckVideoCost to bill when its adapter marked it, else already billed.
 
     Never raises: the provider has already accepted the job, and failing the response
     now would still bill nobody and would lose the caller its video id.
     """
     poll_id: Final = _poll_id(response)
-    if poll_id is None:
-        return
     video_id: Final[object] = getattr(response, "id", None)
     if not isinstance(video_id, str) or not video_id:
-        await _alert(alerts, _unbilled(str(video_id), "the created video has no id"))
+        if poll_id is not None:
+            await _alert(alerts, _unbilled(str(video_id), "the created video has no id"))
         return
     if prisma_client is None:
         # With no database the proxy records no spend at all, so there is nothing to bill against.
-        verbose_proxy_logger.warning("CheckVideoCost: no database, so video %s will not be billed", video_id)
+        if poll_id is not None:
+            verbose_proxy_logger.warning("CheckVideoCost: no database, so video %s will not be billed", video_id)
         return
     try:
-        row: Final = _pending_row(response, video_id, poll_id, user_api_key_dict, request_data, estimated_cost)
+        row: Final = (
+            _owner_row(response, video_id, user_api_key_dict)
+            if poll_id is None
+            else _pending_row(response, video_id, poll_id, user_api_key_dict, request_data, estimated_cost)
+        )
         await _video_jobs(prisma_client).create(data=row)
     except Exception as e:
-        await _alert(alerts, _unbilled(video_id, f"it could not be recorded: {e}"))
+        reason: Final = f"it could not be recorded: {e}"
+        await _alert(alerts, _unowned(video_id, reason) if poll_id is None else _unbilled(video_id, reason))
 
 
 async def unbilled_video_estimate(prisma_client: "PrismaClient", owner: Mapping[str, str]) -> float:

@@ -29,7 +29,6 @@ from litellm.types.videos.main import VideoObject
 from litellm.types.videos.utils import VIDEO_COST_POLL_ID_KEY, VIDEO_ESTIMATED_COST_KEY, encode_video_id_with_provider
 
 MINIMAX_CREATE = "https://api.minimax.io/v2/video_generation"
-MINIMAX_STATUS = "https://api.minimax.io/v2/query/video_generation/mm-task"
 BYTEPLUS_CREATE = "https://ark.ap-southeast.bytepluses.com/api/v3/contents/generations/tasks"
 BYTEPLUS_STATUS = "https://ark.ap-southeast.bytepluses.com/api/v3/contents/generations/tasks/cgt-1"
 OPENROUTER_CREATE = "https://openrouter.ai/api/v1/videos"
@@ -66,19 +65,6 @@ DEPLOYMENTS = [
 ]
 CALLER = UserAPIKeyAuth(api_key="hashed-key", user_id="user-1", team_id="team-1", org_id="org-1", key_alias="ci")
 INPUT_VIDEO = {"type": "video_url", "video_url": {"url": "https://cdn.example/in.mp4"}}
-
-
-def _minimax_task(status: str = "succeeded", input_seconds: int = 0) -> dict:
-    usage = {"output_seconds": 5, "input_seconds": input_seconds, "input_image_count": 0}
-    return {
-        "task": {
-            "id": "mm-task",
-            "status": status,
-            "resolution": "768P",
-            "usage": usage,
-            "model": "MiniMax-H3",
-        }
-    }
 
 
 def _byteplus_task(status: str = "succeeded") -> dict:
@@ -126,11 +112,13 @@ class FakeJobTable:
             raise RuntimeError("db down")
         now = datetime.now(timezone.utc)
         row = SimpleNamespace(
-            id=f"row-{next(self._ids)}",
-            batch_processed=False,
-            created_at=now,
-            updated_at=next(self._clock),
-            **data,
+            **{
+                "id": f"row-{next(self._ids)}",
+                "batch_processed": False,
+                "created_at": now,
+                "updated_at": next(self._clock),
+                **data,
+            }
         )
         self.rows.append(row)
         return row
@@ -253,22 +241,6 @@ def stack(monkeypatch: pytest.MonkeyPatch) -> Iterator[Stack]:
 
 PROVIDER_CASES = [
     pytest.param(
-        "minimax/hailuo-3",
-        {"duration": 5, "resolution": "768P"},
-        (MINIMAX_CREATE, {"task_id": "mm-task", "status": "queued"}),
-        (MINIMAX_STATUS, _minimax_task()),
-        0.4,
-        id="minimax",
-    ),
-    pytest.param(
-        "minimax/hailuo-3",
-        {"duration": 5, "resolution": "768P", "content": [INPUT_VIDEO]},
-        (MINIMAX_CREATE, {"task_id": "mm-task", "status": "queued"}),
-        (MINIMAX_STATUS, _minimax_task(input_seconds=3)),
-        0.64,
-        id="minimax_input_video",
-    ),
-    pytest.param(
         "bytedance/seedance-2.5",
         {"duration": 5, "resolution": "720p"},
         (BYTEPLUS_CREATE, {"id": "cgt-1"}),
@@ -322,13 +294,7 @@ class TestBilledWhenTheJobFinishes:
             assert logged["model"] == create_logged["model"]
         assert logged["endTime"] - logged["startTime"] == pytest.approx(120, abs=5)
         assert billed.usage["provider_reported_cost_usd"] == pytest.approx(cost)
-        if model.startswith("minimax/"):
-            assert logged["metadata"]["usage_object"]["duration_seconds"] == 5
-            assert billed.usage["duration_seconds"] == 5
-            assert billed.usage["input_seconds"] == (3 if "content" in params else 0)
-            assert billed.usage["output_cost_per_second"] == pytest.approx(0.08)
-            assert billed.seconds == "5"
-        elif model.startswith("bytedance/"):
+        if model.startswith("bytedance/"):
             assert billed.usage["total_tokens"] == 100_000
             assert logged["total_tokens"] == 100_000
             assert billed.usage["video_resolution"] == "720p"
@@ -354,7 +320,7 @@ class TestBilledWhenTheJobFinishes:
         assert stack.alerts.messages == []
 
     @pytest.mark.asyncio
-    async def test_minimax_bills_when_rates_live_only_on_litellm_params(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_byteplus_bills_when_rates_live_only_on_litellm_params(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(litellm, "disable_aiohttp_transport", True)
         litellm.in_memory_llm_clients_cache.flush_cache()
         spend = SpendCapture()
@@ -362,31 +328,29 @@ class TestBilledWhenTheJobFinishes:
         monkeypatch.setattr(litellm, "_async_success_callback", [spend])
         deployments = [
             {
-                "model_name": "minimax/hailuo-3",
+                "model_name": "bytedance/seedance-2.5",
                 "litellm_params": {
-                    "model": "minimax/MiniMax-H3",
-                    "api_key": "mm-key",
-                    "output_cost_per_second_768p": 0.08,
-                    "input_cost_per_video_per_second_768p": 0.08,
-                    "input_cost_per_image": 0.04,
-                    "free_input_image_count": 5,
+                    "model": "byteplus/dreamina-seedance-2-5-260628",
+                    "api_key": "bp-key",
+                    "output_cost_per_video_token_without_video_input_720p": 0.0000107,
+                    "output_cost_per_video_token_with_video_input_720p": 0.0000064,
                 },
-                "model_info": {"id": "mm-params-only", "mode": "video_generation"},
+                "model_info": {"id": "bp-params-only", "mode": "video_generation"},
             }
         ]
         stack = Stack(spend)
         stack.router = Router(model_list=deployments)
         with respx.mock(assert_all_called=False) as provider_http:
             provider_http.route().mock(side_effect=stack.providers.handle)
-            stack.providers.reply("POST", MINIMAX_CREATE, {"task_id": "mm-task", "status": "queued"})
-            stack.providers.reply("GET", MINIMAX_STATUS, _minimax_task())
-            video = await stack.create("minimax/hailuo-3", duration=5, resolution="768P")
+            stack.providers.reply("POST", BYTEPLUS_CREATE, {"id": "cgt-1"})
+            stack.providers.reply("GET", BYTEPLUS_STATUS, _byteplus_task())
+            video = await stack.create("bytedance/seedance-2.5", duration=5, resolution="720p")
             await stack.poll(cycles=2)
         litellm.in_memory_llm_clients_cache.flush_cache()
 
         charges = stack.spend.poll_charges()
         assert len(charges) == 1
-        assert charges[0][0]["response_cost"] == pytest.approx(0.4)
+        assert charges[0][0]["response_cost"] == pytest.approx(1.07)
         assert charges[0][1].id == video.id
         assert stack.alerts.messages == []
 
@@ -394,12 +358,10 @@ class TestBilledWhenTheJobFinishes:
     async def test_the_finish_log_ends_when_the_provider_says_the_job_completed(self, stack: Stack) -> None:
         completed = int(datetime.now(timezone.utc).timestamp()) - 30
         started = datetime.now(timezone.utc) - timedelta(minutes=3)
-        body = _minimax_task()
-        body["task"]["completed_at"] = completed
-        stack.providers.reply("POST", MINIMAX_CREATE, {"task_id": "mm-task", "status": "queued"})
-        stack.providers.reply("GET", MINIMAX_STATUS, body)
+        stack.providers.reply("POST", BYTEPLUS_CREATE, {"id": "cgt-1"})
+        stack.providers.reply("GET", BYTEPLUS_STATUS, {**_byteplus_task(), "completed_at": completed})
 
-        await stack.create("minimax/hailuo-3", duration=5, resolution="768P")
+        await stack.create("bytedance/seedance-2.5", duration=5, resolution="720p")
         stack.table.rows[0].created_at = started
         await stack.poll(cycles=2)
 
@@ -410,10 +372,10 @@ class TestBilledWhenTheJobFinishes:
 
     @pytest.mark.asyncio
     async def test_a_running_job_is_not_billed(self, stack: Stack) -> None:
-        stack.providers.reply("POST", MINIMAX_CREATE, {"task_id": "mm-task", "status": "queued"})
-        stack.providers.reply("GET", MINIMAX_STATUS, _minimax_task(status="processing"))
+        stack.providers.reply("POST", BYTEPLUS_CREATE, {"id": "cgt-1"})
+        stack.providers.reply("GET", BYTEPLUS_STATUS, _byteplus_task(status="running"))
 
-        await stack.create("minimax/hailuo-3", duration=5, resolution="768P")
+        await stack.create("bytedance/seedance-2.5", duration=5, resolution="720p")
         await stack.poll()
 
         assert stack.spend.poll_charges() == []
@@ -422,16 +384,18 @@ class TestBilledWhenTheJobFinishes:
 
     @pytest.mark.asyncio
     async def test_a_failed_job_that_reports_usage_is_billed_to_its_creator(self, stack: Stack) -> None:
-        stack.providers.reply("POST", MINIMAX_CREATE, {"task_id": "mm-task", "status": "queued"})
-        failed = _minimax_task(status="failed")
-        failed["task"]["error"] = {"code": "1026", "message": "video description contains sensitive content"}
-        stack.providers.reply("GET", MINIMAX_STATUS, failed)
+        stack.providers.reply("POST", BYTEPLUS_CREATE, {"id": "cgt-1"})
+        failed = {
+            **_byteplus_task(status="failed"),
+            "error": {"code": "1026", "message": "video description contains sensitive content"},
+        }
+        stack.providers.reply("GET", BYTEPLUS_STATUS, failed)
 
-        await stack.create("minimax/hailuo-3", duration=5, resolution="768P")
+        await stack.create("bytedance/seedance-2.5", duration=5, resolution="720p")
         await stack.poll(cycles=2)
 
         ((kwargs, _billed),) = stack.spend.poll_charges()
-        assert kwargs["response_cost"] == pytest.approx(0.4)
+        assert kwargs["response_cost"] == pytest.approx(1.07)
         metadata = kwargs["litellm_params"]["metadata"]
         assert metadata["status"] == "failure"
         assert metadata["error_information"]["error_code"] == "1026"
@@ -516,12 +480,10 @@ class TestBilledWhenTheJobFinishes:
     async def test_a_failed_job_that_reports_no_usage_closes_without_a_charge_or_an_alert(
         self, stack: Stack
     ) -> None:
-        stack.providers.reply("POST", MINIMAX_CREATE, {"task_id": "mm-task", "status": "queued"})
-        failed = _minimax_task(status="failed")
-        failed["task"]["usage"] = {}
-        stack.providers.reply("GET", MINIMAX_STATUS, failed)
+        stack.providers.reply("POST", BYTEPLUS_CREATE, {"id": "cgt-1"})
+        stack.providers.reply("GET", BYTEPLUS_STATUS, {**_byteplus_task(status="failed"), "usage": {}})
 
-        await stack.create("minimax/hailuo-3", duration=5, resolution="768P")
+        await stack.create("bytedance/seedance-2.5", duration=5, resolution="720p")
         await stack.poll(cycles=2)
 
         assert stack.spend.poll_charges() == []
@@ -562,12 +524,12 @@ class TestJobsThatCannotBeBilledYet:
         self, stack: Stack, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(check_video_cost, "MAX_OBJECTS_PER_POLL_CYCLE", 1)
-        stack.providers.reply("POST", MINIMAX_CREATE, {"task_id": "mm-task", "status": "queued"})
-        stack.providers.reply("GET", MINIMAX_STATUS, _minimax_task(status="processing"))
+        stack.providers.reply("POST", BYTEPLUS_CREATE, {"id": "cgt-1"})
+        stack.providers.reply("GET", BYTEPLUS_STATUS, _byteplus_task(status="running"))
         stack.providers.reply("POST", OPENROUTER_CREATE, {"id": "or-job", "status": "pending"})
         stack.providers.reply("GET", OPENROUTER_STATUS, {"id": "or-job", "status": "completed", "usage": {"cost": 0.5}})
 
-        await stack.create("minimax/hailuo-3", duration=5, resolution="768P")
+        await stack.create("bytedance/seedance-2.5", duration=5, resolution="720p")
         await stack.create("openrouter/minimax/hailuo-3", duration=5)
         await stack.poll(cycles=2)
 
@@ -595,12 +557,12 @@ class TestJobsThatCannotBeBilledYet:
 
     @pytest.mark.asyncio
     async def test_one_provider_error_does_not_stop_the_cycle(self, stack: Stack) -> None:
-        stack.providers.reply("POST", MINIMAX_CREATE, {"task_id": "mm-task", "status": "queued"})
-        stack.providers.reply("GET", MINIMAX_STATUS, {"error": "upstream"}, status=500)
+        stack.providers.reply("POST", BYTEPLUS_CREATE, {"id": "cgt-1"})
+        stack.providers.reply("GET", BYTEPLUS_STATUS, {"error": "upstream"}, status=500)
         stack.providers.reply("POST", OPENROUTER_CREATE, {"id": "or-job", "status": "pending"})
         stack.providers.reply("GET", OPENROUTER_STATUS, {"id": "or-job", "status": "completed", "usage": {"cost": 0.5}})
 
-        await stack.create("minimax/hailuo-3", duration=5, resolution="768P")
+        await stack.create("bytedance/seedance-2.5", duration=5, resolution="720p")
         await stack.create("openrouter/minimax/hailuo-3", duration=5)
         await stack.poll()
 
@@ -631,8 +593,8 @@ class TestJobsThatWillNeverBeBilled:
 
     @pytest.mark.asyncio
     async def test_a_job_older_than_the_staleness_window_is_dropped_with_an_alert(self, stack: Stack) -> None:
-        stack.providers.reply("POST", MINIMAX_CREATE, {"task_id": "mm-task", "status": "queued"})
-        await stack.create("minimax/hailuo-3", duration=5, resolution="768P")
+        stack.providers.reply("POST", BYTEPLUS_CREATE, {"id": "cgt-1"})
+        await stack.create("bytedance/seedance-2.5", duration=5, resolution="720p")
         (row,) = stack.table.rows
         row.created_at = datetime.now(timezone.utc) - timedelta(days=30)
 
@@ -641,7 +603,26 @@ class TestJobsThatWillNeverBeBilled:
         assert (row.status, row.batch_processed) == ("stale_expired", True)
         assert len(stack.alerts.messages) == 1
         assert "gave up on 1 video jobs" in stack.alerts.messages[0]
-        assert ("GET", MINIMAX_STATUS) not in stack.providers.seen
+        assert ("GET", BYTEPLUS_STATUS) not in stack.providers.seen
+
+
+class TestJobsBilledAtCreate:
+    @pytest.mark.asyncio
+    async def test_a_minimax_job_is_billed_once_at_create_and_kept_as_its_creators(self, stack: Stack) -> None:
+        stack.providers.reply("POST", MINIMAX_CREATE, {"task_id": "mm-task"})
+
+        video = await stack.create("minimax/hailuo-3", duration=5, resolution="768P")
+        await stack.poll(cycles=2)
+
+        ((create_kwargs, _created),) = stack.spend.create_charges()
+        assert create_kwargs["response_cost"] == pytest.approx(5 * 0.08), "upstream's adapter bills 5 s at 768p at create"
+        assert stack.spend.poll_charges() == []
+        assert stack.providers.seen == [("POST", MINIMAX_CREATE)], "the poller must never ask MiniMax about the job"
+        (row,) = stack.table.rows
+        assert (row.unified_object_id, row.created_by, row.team_id) == (video.id, "user-1", "team-1")
+        assert row.batch_processed is True
+        assert await check_video_cost.unbilled_video_estimate(stack.prisma, {"team_id": "team-1"}) == 0.0
+        assert stack.alerts.messages == []
 
 
 def _created_video(poll_id: str | None, video_id: str) -> VideoObject:
@@ -679,11 +660,27 @@ class TestRecordPendingVideoJob:
         assert alerts.messages == []
 
     @pytest.mark.asyncio
-    async def test_a_video_without_a_poll_id_is_not_recorded(self) -> None:
+    async def test_a_video_without_a_poll_id_is_recorded_as_its_creators_and_already_billed(self) -> None:
         table, alerts = await self._record(_created_video(None, self.CALLER_VIDEO_ID))
 
-        assert table.rows == []
+        (row,) = table.rows
+        assert row.unified_object_id == self.CALLER_VIDEO_ID
+        assert row.model_object_id == f"video:billed-at-create:{self.CALLER_VIDEO_ID}"
+        assert (row.file_purpose, row.status, row.batch_processed) == ("video", "queued", True)
+        assert (row.created_by, row.team_id, row.org_id, row.api_key) == ("user-1", "team-1", "org-1", "hashed-key")
         assert alerts.messages == []
+
+    @pytest.mark.asyncio
+    async def test_a_failed_owner_write_alerts_that_the_video_will_be_refused(self) -> None:
+        table = FakeJobTable()
+        table.fail_create = True
+
+        _table, alerts = await self._record(_created_video(None, self.CALLER_VIDEO_ID), table=table)
+
+        assert alerts.messages == [
+            f"CheckVideoCost: video {self.CALLER_VIDEO_ID} has no owner record, so its status and download are "
+            "refused: it could not be recorded: db down"
+        ]
 
     @pytest.mark.asyncio
     async def test_a_failed_write_alerts_instead_of_failing_the_create(self) -> None:
