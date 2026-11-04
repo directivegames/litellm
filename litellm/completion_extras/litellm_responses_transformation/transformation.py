@@ -516,6 +516,13 @@ def _shifted_annotations(messages: Sequence["Message"], offsets: Sequence[int]) 
             yield _shift_annotation(annotation, offset)
 
 
+def _folded_reasoning_content(reasoning_contents: Sequence[str | None]) -> str | None:
+    """None only when no reasoning item was seen: chat clients read a missing field as no reasoning."""
+    if all(value is None for value in reasoning_contents):
+        return None
+    return " ".join(value for value in reasoning_contents if value)
+
+
 def _fold_choices_into_one(
     choices: Sequence["Choices"],
     tool_calls: Sequence[Mapping[str, object]],
@@ -547,7 +554,7 @@ def _fold_choices_into_one(
             content="".join(texts) if messages else None,
             annotations=list(annotations) or None,
             tool_calls=list(tool_calls) or None,
-            reasoning_content=" ".join(value for value in reasoning_contents if value) or None,
+            reasoning_content=_folded_reasoning_content(reasoning_contents),
             reasoning_items=_as_chat_reasoning_items(reasoning_items),
             provider_specific_fields=_tool_search_provider_fields(tool_search_items),
         ),

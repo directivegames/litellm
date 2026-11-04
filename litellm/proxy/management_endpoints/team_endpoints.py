@@ -3935,6 +3935,7 @@ async def team_member_update(
     """
     from litellm.proxy.proxy_server import (
         litellm_proxy_admin_name,
+        premium_user,
         prisma_client,
         user_api_key_cache,
     )

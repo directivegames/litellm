@@ -1876,7 +1876,7 @@ def test_responses_api_bridge_check_gpt_5_nano_effort_without_tools_routes_to_re
     """
     from litellm.main import responses_api_bridge_check
 
-    with patch("litellm.main._get_model_info_helper") as mock_get_model_info:
+    with patch("litellm.responses.bridge_check.get_model_info_helper") as mock_get_model_info:
         mock_get_model_info.return_value = {"max_tokens": 128000}
         model_info, model = responses_api_bridge_check(
             model="gpt-5-nano",
@@ -1895,7 +1895,7 @@ def test_responses_api_bridge_check_gpt_5_nano_effort_with_custom_tool_stays_cha
     """Custom tools with an explicit effort stay on chat for their native tool_call shape."""
     from litellm.main import responses_api_bridge_check
 
-    with patch("litellm.main._get_model_info_helper") as mock_get_model_info:
+    with patch("litellm.responses.bridge_check.get_model_info_helper") as mock_get_model_info:
         mock_get_model_info.return_value = {"max_tokens": 128000}
         model_info, _ = responses_api_bridge_check(
             model="gpt-5-nano",
@@ -1913,7 +1913,7 @@ def test_responses_api_bridge_check_gpt_5_nano_effort_on_custom_api_base_stays_c
     """An OpenAI-compatible backend on its own api_base may have no /responses route."""
     from litellm.main import responses_api_bridge_check
 
-    with patch("litellm.main._get_model_info_helper") as mock_get_model_info:
+    with patch("litellm.responses.bridge_check.get_model_info_helper") as mock_get_model_info:
         mock_get_model_info.return_value = {"max_tokens": 128000}
         model_info, _ = responses_api_bridge_check(
             model="gpt-5-nano",
@@ -1968,7 +1968,7 @@ def test_responses_api_bridge_check_reasoning_effort_none_without_tools_stays_ch
     """reasoning_effort none with no tools stays on Chat Completions."""
     from litellm.main import responses_api_bridge_check
 
-    with patch("litellm.main._get_model_info_helper") as mock_get_model_info:
+    with patch("litellm.responses.bridge_check.get_model_info_helper") as mock_get_model_info:
         mock_get_model_info.return_value = {"max_tokens": 128000}
         model_info, model = responses_api_bridge_check(
             model="gpt-5-nano",

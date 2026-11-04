@@ -187,7 +187,7 @@ def responses_api_bridge_check(
         )
     )
     bridges_for_reasoning_trace: Final = (
-        reasoning_effort is not None and reasoning_active and not tools and on_constraint_enforcing_endpoint
+        reasoning_effort is not None and requested_effort != "none" and not tools and on_constraint_enforcing_endpoint
     )
     if (
         (custom_llm_provider in ("openai", "azure") or on_foundry_openai_endpoint)
