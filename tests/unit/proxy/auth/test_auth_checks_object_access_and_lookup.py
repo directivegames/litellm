@@ -5239,14 +5239,18 @@ async def test_team_budget_check_blocks_once_spend_reaches_the_cap(max_budget: f
 
 
 @pytest.mark.asyncio
-async def test_team_budget_check_allows_spend_below_the_cap():
-    team_object: Final = LiteLLM_TeamTable(team_id="test-team", spend=9.99, max_budget=10.0)
+async def test_team_budget_check_allows_spend_below_the_cap_and_refuses_it_at_the_cap():
+    below_cap: Final = LiteLLM_TeamTable(team_id="test-team", spend=9.99, max_budget=10.0)
+    at_cap: Final = LiteLLM_TeamTable(team_id="test-team", spend=10.0, max_budget=10.0)
+    valid_token: Final = UserAPIKeyAuth(token="test-token", team_id="test-team")
 
     with _patched_spend(9.99):
         await team_max_budget_check(
-            team_object=team_object,
-            valid_token=UserAPIKeyAuth(token="test-token", team_id="test-team"),
-            proxy_logging_obj=_budget_logging_obj(),
+            team_object=below_cap, valid_token=valid_token, proxy_logging_obj=_budget_logging_obj()
+        )
+    with _patched_spend(10.0), pytest.raises(litellm.BudgetExceededError):
+        await team_max_budget_check(
+            team_object=at_cap, valid_token=valid_token, proxy_logging_obj=_budget_logging_obj()
         )
 
 

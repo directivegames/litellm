@@ -1888,7 +1888,7 @@ _batch_polling_env: Final = os.getenv("PROXY_BATCH_POLLING_ENABLED", "true").low
 PROXY_BATCH_POLLING_ENABLED: Final = _batch_polling_env == "true"
 # Video jobs finish in minutes, so their cost poller runs far more often than the
 # batch one; the caller's spend lags the finished job by at most one interval.
-PROXY_VIDEO_COST_POLLING_INTERVAL: Final = max(1, int(os.getenv("PROXY_VIDEO_COST_POLLING_INTERVAL", 60)))
+PROXY_VIDEO_COST_POLLING_INTERVAL: Final = max(1, int(os.getenv("PROXY_VIDEO_COST_POLLING_INTERVAL", "60")))
 BACKGROUND_INTERACTION_COST_POLL_INITIAL_INTERVAL_SECONDS: Final = get_env_float(
     "BACKGROUND_INTERACTION_COST_POLL_INITIAL_INTERVAL_SECONDS", 5.0
 )

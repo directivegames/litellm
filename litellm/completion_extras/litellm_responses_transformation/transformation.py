@@ -313,11 +313,11 @@ def _apply_pending_reasoning(
 ) -> None:
     if reasoning_content is None:
         return
-    message = choice.message
+    message: Final = choice.message
     if getattr(message, "reasoning_content", None) is None:
         message.reasoning_content = reasoning_content
     if pending_reasoning_item is not None and not getattr(message, "reasoning_items", None):
-        message.reasoning_items = cast(
+        message.reasoning_items = cast(  # cast-ok: the built item has the ChatCompletionReasoningItem fields
             list[ChatCompletionReasoningItem],
             [pending_reasoning_item],
         )

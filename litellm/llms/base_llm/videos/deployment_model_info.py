@@ -6,7 +6,10 @@ helper merges nested model_info with the pricing fields on litellm_params.
 """
 
 from collections.abc import Mapping
-from typing import Final, cast
+from types import MappingProxyType
+from typing import Final
+
+from pydantic import TypeAdapter, ValidationError
 
 from litellm.types.router import GenericLiteLLMParams
 from litellm.types.utils import CustomPricingLiteLLMParams
@@ -23,19 +26,31 @@ _PRICING_EXACT: Final = frozenset(
         "free_input_image_count",
     }
 )
+_NOT_PRICING: Final = frozenset({"model", "api_key", "model_info"})
+_CUSTOM_PRICING_FIELDS: Final = frozenset(CustomPricingLiteLLMParams.model_fields)
+
+_FIELDS_ADAPTER: Final = TypeAdapter(dict[str, object])
+
+
+def _fields(value: object) -> Mapping[str, object]:
+    try:
+        return MappingProxyType(_FIELDS_ADAPTER.validate_python(value))
+    except ValidationError:
+        return MappingProxyType({})
+
+
+def _is_pricing_key(key: str) -> bool:
+    if key in _CUSTOM_PRICING_FIELDS:
+        return True
+    return key not in _NOT_PRICING and (key in _PRICING_EXACT or key.startswith(_PRICING_PREFIXES))
 
 
 def deployment_pricing_model_info(litellm_params: GenericLiteLLMParams) -> Mapping[str, object]:
     """Rates for video create and cost polling, from model_info and litellm_params."""
-    nested: Final = cast("Mapping[str, object] | None", litellm_params.model_info)
-    merged: dict[str, object] = dict(nested) if nested is not None else {}
-    for field in CustomPricingLiteLLMParams.model_fields:
-        value: Final = litellm_params.get(field)
-        if value is not None:
-            merged[field] = value
-    for key, value in litellm_params.model_dump(exclude_none=True).items():
-        if key in ("model", "api_key", "model_info"):
-            continue
-        if key in _PRICING_EXACT or any(key.startswith(prefix) for prefix in _PRICING_PREFIXES):
-            merged[key] = value
-    return merged
+    set_params: Final = _fields(litellm_params.model_dump(exclude_none=True))
+    return MappingProxyType(
+        {
+            **_fields(litellm_params.model_info),
+            **{key: value for key, value in set_params.items() if _is_pricing_key(key)},
+        }
+    )

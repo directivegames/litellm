@@ -1390,10 +1390,13 @@ def _make_team_member_add_request(
 def test_team_call_validation_checks_accepts_admin_member_without_license():
     from litellm.proxy.management_endpoints.team_endpoints import team_call_validation_checks
 
-    team_call_validation_checks(
-        prisma_client=MagicMock(),
-        data=_make_team_member_add_request(member_user_id="new-admin", role="admin"),
-    )
+    admin_member: Final = _make_team_member_add_request(member_user_id="new-admin", role="admin")
+
+    # No premium license is set, and only a missing database refuses the same admin request.
+    team_call_validation_checks(prisma_client=MagicMock(), data=admin_member)
+    with pytest.raises(HTTPException) as refused:
+        team_call_validation_checks(prisma_client=None, data=admin_member)
+    assert refused.value.status_code == 500
 
 
 @pytest.mark.asyncio

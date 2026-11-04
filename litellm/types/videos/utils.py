@@ -8,7 +8,9 @@ Format: vid_{base64_encoded_string}
 import base64
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Final, cast
+from typing import Final, cast  # noqa: TID251  # stamp_provider_task_id writes into the logging object's own untyped dicts
+
+from pydantic import TypeAdapter, ValidationError
 
 from litellm._logging import verbose_logger
 from litellm.types.utils import SpecialEnums
@@ -35,6 +37,8 @@ PROVIDER_TASK_ID_KEY: Final = "provider_task_id"
 # budgets (video_budget_hold.py). The create log row shows it beside the provider task id.
 VIDEO_ESTIMATED_COST_KEY: Final = "video_estimated_cost"
 
+_FIELDS_ADAPTER: Final = TypeAdapter(dict[str, object])
+
 
 def stamp_provider_task_id(logging_obj: object, task_id: str) -> None:
     """Show the provider's task id, and on a create the budget hold's estimate, in the log row's metadata.
@@ -42,26 +46,35 @@ def stamp_provider_task_id(logging_obj: object, task_id: str) -> None:
     The caller's video id hides it inside an encoded string. spend_logs_metadata is the one
     free-form key the spend log keeps. Merging, not replacing, keeps what the caller put there.
     """
-    details: Final[object] = getattr(logging_obj, "model_call_details", None)
-    if not isinstance(details, dict):
+    details: Final = _live_dict(getattr(logging_obj, "model_call_details", None))
+    if details is None:
         return
-    params: object = details.get("litellm_params")
-    if not isinstance(params, dict):
-        params = {}
-        details["litellm_params"] = params
+    params: Final = _child_dict(details, "litellm_params")
     # litellm_metadata, when set, is the bucket the spend log reads instead of metadata.
     bucket: Final = "litellm_metadata" if params.get("litellm_metadata") else "metadata"
-    metadata: object = params.get(bucket)
-    if not isinstance(metadata, dict):
-        metadata = {}
-        params[bucket] = metadata
-    existing: Final[object] = metadata.get("spend_logs_metadata")
+    metadata: Final = _child_dict(params, bucket)
     estimate: Final = _estimated_cost(logging_obj)
     metadata["spend_logs_metadata"] = {
-        **(existing if isinstance(existing, dict) else {}),
+        **_mapping(metadata.get("spend_logs_metadata")),
         PROVIDER_TASK_ID_KEY: task_id,
         **({VIDEO_ESTIMATED_COST_KEY: estimate} if estimate is not None else {}),
     }
+
+
+# The logging object's own dicts, returned and written in place.
+def _live_dict(value: object) -> dict[str, object] | None:  # mutable-ok: written in place
+    if not isinstance(value, dict):
+        return None
+    return cast("dict[str, object]", value)  # cast-ok: logging params are untyped dicts this module writes in place
+
+
+def _child_dict(parent: dict[str, object], key: str) -> dict[str, object]:  # mutable-ok: written in place
+    existing: Final = _live_dict(parent.get(key))
+    if existing is not None:
+        return existing
+    created: Final[dict[str, object]] = {}  # mutable-ok: inserted into the logging object
+    parent[key] = created  # rebind-ok: the point is to write into the logging object
+    return created
 
 
 def _estimated_cost(logging_obj: object) -> float | None:
@@ -75,9 +88,10 @@ def _estimated_cost(logging_obj: object) -> float | None:
 
 
 def _mapping(value: object) -> Mapping[str, object]:
-    if not isinstance(value, Mapping):
+    try:
+        return MappingProxyType(_FIELDS_ADAPTER.validate_python(value))
+    except ValidationError:
         return MappingProxyType({})
-    return cast("Mapping[str, object]", value)  # cast-ok: logging params are untyped
 
 
 class DecodedCharacterId(dict):

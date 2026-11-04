@@ -5867,9 +5867,12 @@ def completion(
         if responses_api_model_info.get("mode") == "responses" and not skip_responses_api_bridge:
             from litellm.completion_extras import responses_api_bridge
 
-            optional_params, rs_val = strip_reasoning_summary_aliases_from_optional_params(optional_params)
-            if rs_val is None and BRIDGE_REASONING_SUMMARY_KEY in responses_api_model_info:
-                rs_val = BRIDGE_REASONING_SUMMARY
+            optional_params, sent_summary = strip_reasoning_summary_aliases_from_optional_params(optional_params)
+            rs_val: Final = (
+                BRIDGE_REASONING_SUMMARY
+                if sent_summary is None and BRIDGE_REASONING_SUMMARY_KEY in responses_api_model_info
+                else sent_summary
+            )
 
             if isinstance(reasoning_effort, dict) and "summary" in reasoning_effort:
                 optional_params["reasoning_effort"] = reasoning_effort

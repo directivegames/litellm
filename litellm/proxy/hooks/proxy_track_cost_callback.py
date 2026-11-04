@@ -156,6 +156,8 @@ def _failure_snapshot_with_guardrails_recorded_after_it(
     ):
         return None
     return {**failure_snapshot, "guardrail_information": recorded_guardrail_information}
+
+
 def _is_video_cost_poll(metadata: Mapping[str, object]) -> bool:
     return metadata.get(INTERNAL_CALL_ORIGIN_METADATA_KEY) == BACKGROUND_VIDEO_COST_POLL_CALL_ORIGIN
 

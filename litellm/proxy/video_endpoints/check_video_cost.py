@@ -42,7 +42,7 @@ import math
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final, Protocol, cast
+from typing import TYPE_CHECKING, Final, Protocol, cast  # noqa: TID251  # Prisma rows and logging params are untyped; each cast carries cast-ok
 from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -160,7 +160,7 @@ async def _alert(alerts: VideoCostAlerts, message: str, model: str = "") -> None
     verbose_proxy_logger.error(message)
     try:
         await alerts.failed_tracking_alert(error_message=message, failing_model=model)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001  # an alert that cannot be sent must not stop billing
         verbose_proxy_logger.error("CheckVideoCost: could not send the alert: %s", e)
 
 
@@ -230,7 +230,7 @@ def _pending_row(
         metadata=_creator_identity(user_api_key_dict, _request_tags(request_data)),
         estimated_cost=estimated_cost,
     )
-    return {  # mutable-ok: prisma's query builder rejects a Mapping
+    return {
         "unified_object_id": video_id,
         # Prefixed so a video task id can never match a batch id that
         # enforce_batch_object_access looks up by model_object_id.
@@ -243,7 +243,7 @@ def _pending_row(
 
 
 def _owner_row(response: object, video_id: str, user_api_key_dict: "UserAPIKeyAuth") -> Mapping[str, object]:
-    return {  # mutable-ok: prisma's query builder rejects a Mapping
+    return {
         "unified_object_id": video_id,
         "model_object_id": f"{VIDEO_FILE_PURPOSE}:billed-at-create:{video_id}",
         "file_object": "{}",
@@ -302,7 +302,7 @@ async def record_pending_video_job(
             else _pending_row(response, video_id, poll_id, user_api_key_dict, request_data, estimated_cost)
         )
         await _video_jobs(prisma_client).create(data=row)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001  # the provider already accepted the job, so the create must not fail
         reason: Final = f"it could not be recorded: {e}"
         await _alert(alerts, _unowned(video_id, reason) if poll_id is None else _unbilled(video_id, reason))
 
@@ -313,13 +313,13 @@ async def unbilled_video_estimate(prisma_client: "PrismaClient", owner: Mapping[
     A job stops counting once the poller claims it (batch_processed), which is when its spend is written.
     """
     jobs: Final = await _video_jobs(prisma_client).find_many(
-        where={  # mutable-ok: prisma's query builder rejects a Mapping
+        where={
             **owner,
             "file_purpose": VIDEO_FILE_PURPOSE,
             "batch_processed": False,
         },
         take=UNBILLED_ESTIMATE_LOOKUP_LIMIT,
-        order={"created_at": "desc"},  # mutable-ok: prisma's query builder rejects a Mapping
+        order={"created_at": "desc"},
     )
     records: Final = (_poll_record(job) for job in jobs)
     estimates: Final = (record.estimated_cost for record in records if record is not None)
@@ -363,8 +363,6 @@ def _generation_times(job: _VideoJobRow, video: "VideoObject") -> tuple[datetime
     """
     end: Final = _positive_unix_time(video.completed_at) or datetime.now(timezone.utc)
     start: Final = job.created_at
-    if not isinstance(start, datetime):
-        return end, end
     aware: Final = start if start.tzinfo is not None else start.replace(tzinfo=timezone.utc)
     if aware > end:
         return end, end
@@ -383,20 +381,22 @@ def _poller_litellm_params(
     """
     from litellm.types.router import GenericLiteLLMParams
 
-    merged: dict[str, object] = dict(  # mutable-ok: pydantic input
-        deployment.litellm_params.model_dump(exclude_none=True)
+    merged: Final = MappingProxyType(
+        {
+            **deployment.litellm_params.model_dump(exclude_none=True),
+            **credentials,
+            "model": deployment.litellm_params.model,
+            "model_info": deployment.model_info.model_dump(exclude_none=True),
+        }
     )
-    merged.update(credentials)
-    merged["model"] = deployment.litellm_params.model
-    merged["model_info"] = deployment.model_info.model_dump(exclude_none=True)
-    return GenericLiteLLMParams.model_validate(MappingProxyType(merged))
+    return GenericLiteLLMParams.model_validate(merged)
 
 
 def _finish_spend_log_model(deployment: "Deployment | None", video: "VideoObject") -> str:
     """The model name on the finish spend row matches the create row (deployment wire model)."""
     if deployment is not None:
         wire_model: Final = deployment.litellm_params.model
-        if isinstance(wire_model, str) and wire_model:
+        if wire_model:
             return wire_model
     provider_model: Final = video.model
     return provider_model if isinstance(provider_model, str) else ""
@@ -432,24 +432,24 @@ class CheckVideoCost:
     async def check_video_cost(self) -> None:
         try:
             await self._expire_stale_jobs()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  # a failed sweep must not stop the billing cycle
             verbose_proxy_logger.warning("CheckVideoCost: stale sweep failed (poll will continue): %s", e)
 
         # Every check rewrites the row, so ordering by updated_at sends a job that cannot be
         # billed yet to the back, instead of letting it hold a slot in every cycle.
         jobs: Final = await self.jobs.find_many(
-            where={  # mutable-ok: prisma's query builder rejects a Mapping
+            where={
                 "file_purpose": VIDEO_FILE_PURPOSE,
                 "batch_processed": False,
-                "status": {"not_in": [*TERMINAL_VIDEO_JOB_STATUSES]},  # mutable-ok: prisma needs a dict
+                "status": {"not_in": [*TERMINAL_VIDEO_JOB_STATUSES]},
             },
             take=MAX_OBJECTS_PER_POLL_CYCLE,
-            order={"updated_at": "asc"},  # mutable-ok: prisma's query builder rejects a Mapping
+            order={"updated_at": "asc"},
         )
         for job in jobs:
             try:
                 await self._check_job(job)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001  # one job's error must not stop the others; it is retried
                 verbose_proxy_logger.error(
                     "CheckVideoCost: could not check video %s; retrying later: %s", job.unified_object_id, e
                 )
@@ -459,12 +459,12 @@ class CheckVideoCost:
         """A job the provider has not finished within the staleness window never will; stop polling it."""
         cutoff: Final = datetime.now(timezone.utc) - timedelta(days=MANAGED_OBJECT_STALENESS_CUTOFF_DAYS)
         expired: Final = await self.jobs.update_many(
-            where={  # mutable-ok: prisma's query builder rejects a Mapping
+            where={
                 "file_purpose": VIDEO_FILE_PURPOSE,
                 "batch_processed": False,
-                "created_at": {"lt": cutoff},  # mutable-ok: prisma needs a dict
+                "created_at": {"lt": cutoff},
             },
-            data={"status": "stale_expired", "batch_processed": True},  # mutable-ok: prisma needs a dict
+            data={"status": "stale_expired", "batch_processed": True},
         )
         if expired > 0:
             await _alert(
@@ -508,17 +508,13 @@ class CheckVideoCost:
         await self._set_status(job, closed_status)
 
     async def _set_status(self, job: _VideoJobRow, status: str, processed: bool = False) -> None:
-        data: Final = (
-            {"status": status, "batch_processed": True}  # mutable-ok: prisma needs a dict
-            if processed
-            else {"status": status}  # mutable-ok: prisma needs a dict
-        )
-        await self.jobs.update(where={"id": job.id}, data=data)  # mutable-ok: prisma's query builder rejects a Mapping
+        data: Final = {"status": status, "batch_processed": True} if processed else {"status": status}
+        await self.jobs.update(where={"id": job.id}, data=data)
 
     async def _touch(self, job: _VideoJobRow) -> None:
         try:
             await self._set_status(job, job.status or "queued")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  # the job is retried next cycle either way
             verbose_proxy_logger.error("CheckVideoCost: could not requeue video %s: %s", job.unified_object_id, e)
 
     async def _close_unbilled(self, job: _VideoJobRow, status: str, reason: str, model: str = "") -> None:
@@ -528,18 +524,18 @@ class CheckVideoCost:
     async def _claim(self, job: _VideoJobRow) -> bool:
         """Every pod runs this poller; only the one whose flip from unbilled succeeds may bill the job."""
         claimed: Final = await self.jobs.update_many(
-            where={"id": job.id, "batch_processed": False},  # mutable-ok: prisma's query builder rejects a Mapping
-            data={"batch_processed": True},  # mutable-ok: prisma's query builder rejects a Mapping
+            where={"id": job.id, "batch_processed": False},
+            data={"batch_processed": True},
         )
         return claimed > 0
 
     async def _release(self, job: _VideoJobRow) -> None:
         try:
             await self.jobs.update_many(
-                where={"id": job.id, "batch_processed": True},  # mutable-ok: prisma's query builder rejects a Mapping
-                data={"batch_processed": False},  # mutable-ok: prisma's query builder rejects a Mapping
+                where={"id": job.id, "batch_processed": True},
+                data={"batch_processed": False},
             )
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  # any failure to release is alerted as unbilled
             reason: Final = f"its claim could not be released after a failed charge: {e}"
             await _alert(self.alerts, _unbilled(job.unified_object_id, reason))
 
@@ -567,7 +563,7 @@ class CheckVideoCost:
             video_status_provider_config=config,
             custom_llm_provider=record.custom_llm_provider,
             litellm_params=litellm_params,
-            logging_obj=_logging_obj("", None, {}, record.custom_llm_provider),  # mutable-ok: Logging writes into it
+            logging_obj=_logging_obj("", None, {}, record.custom_llm_provider),
             api_key=api_key if isinstance(api_key, str) else None,
         )
 
@@ -578,26 +574,26 @@ class CheckVideoCost:
         # (additional_usage_values) even with prompt and response storage off. The caller's
         # own copy of the video never carries it.
         provider_response: Final[object] = _without_link_signatures(
-            video._hidden_params.get(PROVIDER_RESPONSE_KEY)  # pyright: ignore[reportPrivateUsage]
+            video._hidden_params.get(PROVIDER_RESPONSE_KEY)  # pyright: ignore[reportPrivateUsage]  # adapters hand facts over here
         )
         billed_usage: Final = {**(video.usage or {}), PROVIDER_RESPONSE_KEY: provider_response}
         billed: Final = video.model_copy(update=MappingProxyType({"id": job.unified_object_id, "usage": billed_usage}))
-        billed._hidden_params = {  # pyright: ignore[reportPrivateUsage]  # logging reads the cost here  # mutable-ok: logging writes into it
+        billed._hidden_params = {  # pyright: ignore[reportPrivateUsage]  # logging reads the cost here
             **video._hidden_params,  # pyright: ignore[reportPrivateUsage]  # the adapter's facts carry over
             "response_cost": cost,
             "model_id": record.model_id,
         }
-        task_id: Final[object] = video._hidden_params.get(PROVIDER_TASK_ID_KEY)  # pyright: ignore[reportPrivateUsage]
-        metadata: Final = {  # mutable-ok: the success handler writes hidden_params into this metadata
+        task_id: Final[object] = video._hidden_params.get(PROVIDER_TASK_ID_KEY)  # pyright: ignore[reportPrivateUsage]  # adapters hand facts over here
+        metadata: Final = {
             **record.metadata,
             # The one free-form key spend logs keep, so the dashboard shows the provider's task id.
             "spend_logs_metadata": {PROVIDER_TASK_ID_KEY: task_id},
             **_failure_metadata(video),
-            "model_info": {"id": record.model_id},  # mutable-ok: spend logs read the deployment id here
+            "model_info": {"id": record.model_id},
             "model_group": deployment.model_name if deployment is not None else None,
             INTERNAL_CALL_ORIGIN_METADATA_KEY: BACKGROUND_VIDEO_COST_POLL_CALL_ORIGIN,
         }
-        request: Final = {"headers": {"user-agent": CHECK_VIDEO_COST_USER_AGENT}}  # mutable-ok: logging reads a dict
+        request: Final = {"headers": {"user-agent": CHECK_VIDEO_COST_USER_AGENT}}
         params: Final[dict[str, object]] = {  # mutable-ok: Logging writes into it
             "proxy_server_request": request,
             "metadata": metadata,
@@ -638,13 +634,11 @@ def _without_link_signatures(value: object) -> object:
         parts: Final = urlsplit(value)
         return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
     if isinstance(value, Mapping):
-        mapping: Final = cast(Mapping[object, object], value)
-        return {  # mutable-ok: serialized into the spend log
-            key: _without_link_signatures(item) for key, item in mapping.items()
-        }
+        mapping: Final = cast(Mapping[object, object], value)  # cast-ok: provider JSON, walked only to cut links
+        return {key: _without_link_signatures(item) for key, item in mapping.items()}
     if isinstance(value, list | tuple):
-        items: Final = cast(Sequence[object], value)
-        return [_without_link_signatures(item) for item in items]  # mutable-ok: serialized into the spend log
+        items: Final = cast(Sequence[object], value)  # cast-ok: provider JSON, walked only to cut links
+        return [_without_link_signatures(item) for item in items]
     return value
 
 
@@ -659,16 +653,16 @@ def _logging_obj(
 
     logging_obj: Final = LiteLLMLogging(
         model=model,
-        messages=[{"role": "user", "content": prompt}] if prompt else [],  # mutable-ok: Logging's messages is a list
+        messages=[{"role": "user", "content": prompt}] if prompt else [],
         stream=False,
         call_type="avideo_retrieve",
-        start_time=datetime.now(),
+        start_time=datetime.now(),  # noqa: DTZ005  # Logging compares this with the naive times it records
         litellm_call_id=str(uuid.uuid4()),
         function_id=str(uuid.uuid4()),
     )
     logging_obj.update_environment_variables(  # pyright: ignore[reportUnknownMemberType]  # its dict parameters are untyped
         litellm_params=litellm_params,
-        optional_params={},  # mutable-ok: Logging writes into its optional_params
+        optional_params={},
         custom_llm_provider=custom_llm_provider,
     )
     return logging_obj

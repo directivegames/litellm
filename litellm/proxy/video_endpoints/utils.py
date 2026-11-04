@@ -1,12 +1,16 @@
+from types import MappingProxyType
 from typing import Any, Final
 
 import orjson
+from pydantic import BaseModel, TypeAdapter
 
 from litellm.types.videos.utils import (
     decode_video_id_with_provider,
     encode_character_id_with_provider,
     encode_video_id_with_provider,
 )
+
+_RESPONSE_FIELDS: Final = TypeAdapter(dict[str, object])
 
 
 def extract_model_from_target_model_names(target_model_names: Any) -> str | None:
@@ -52,21 +56,34 @@ def get_custom_provider_from_data(data: dict[str, Any]) -> str | None:
     return None
 
 
-def encode_video_id_in_response(response: Any, fallback_model_id: str | None = None) -> Any:
+def _hidden_model_id(response: object) -> str | None:
+    match getattr(response, "_hidden_params", None):
+        case {"model_id": str(model_id)} if model_id:
+            return model_id
+        case _:
+            return None
+
+
+def _response_id(response: object) -> str | None:
+    match response:
+        case {"id": str(video_id)} if video_id:
+            return video_id
+        case _:
+            attribute: Final[object] = getattr(response, "id", None)
+            return attribute if isinstance(attribute, str) and attribute else None
+
+
+def encode_video_id_in_response(response: object, fallback_model_id: str | None = None) -> object:
     """
-    Record the router deployment id in a returned video id.
+    A copy of the response whose video id records the router deployment id.
 
     Provider adapters encode the provider's model name, which can match several deployments
     (a direct row and an OpenRouter row can share minimax/hailuo-3). A deployment id resolves to
     exactly one. Ids the adapter left unencoded are returned as the provider sent them.
     """
-    hidden_params: Final = getattr(response, "_hidden_params", None) or {}
-    model_id: Final = hidden_params.get("model_id") or fallback_model_id
-    if not model_id:
-        return response
-
-    video_id: Final = response.get("id") if isinstance(response, dict) else getattr(response, "id", None)
-    if not isinstance(video_id, str) or not video_id:
+    model_id: Final = _hidden_model_id(response) or fallback_model_id
+    video_id: Final = _response_id(response)
+    if not model_id or video_id is None:
         return response
 
     decoded: Final = decode_video_id_with_provider(video_id)
@@ -75,11 +92,10 @@ def encode_video_id_in_response(response: Any, fallback_model_id: str | None = N
         return response
 
     encoded: Final = encode_video_id_with_provider(decoded.get("video_id") or video_id, provider, model_id)
-    if isinstance(response, dict):
-        response["id"] = encoded
-    else:
-        response.id = encoded
-    return response
+    if isinstance(response, BaseModel):
+        # model_copy keeps _hidden_params, which the job record reads for the poll id.
+        return response.model_copy(update=MappingProxyType({"id": encoded}))
+    return {**_RESPONSE_FIELDS.validate_python(response), "id": encoded}
 
 
 def encode_character_id_in_response(response: Any, custom_llm_provider: str, model_id: str | None) -> object:

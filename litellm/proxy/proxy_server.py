@@ -7403,7 +7403,7 @@ class ProxyConfig:
             for _meta_field in ("created_at", "updated_at", "created_by", "updated_by"):
                 _meta_value = getattr(model, _meta_field, None)
                 if _meta_value is not None:
-                    model.model_info[_meta_field] = _meta_value
+                    model.model_info[_meta_field] = _meta_value  # rebind-ok: fills model_info in place, as above
 
         if model.model_info is not None and isinstance(model.model_info, dict):
             if "id" not in model.model_info:
