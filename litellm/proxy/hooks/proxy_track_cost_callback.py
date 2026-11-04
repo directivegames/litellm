@@ -165,9 +165,11 @@ def _is_video_cost_poll(metadata: Mapping[str, object]) -> bool:
 def _is_zero_response_cost(response_cost: object) -> bool:
     if response_cost is None:
         return True
+    if isinstance(response_cost, bool) or not isinstance(response_cost, (int, float, str)):
+        return False
     try:
         return float(response_cost) == 0.0
-    except (TypeError, ValueError):
+    except ValueError:
         return False
 
 
@@ -511,7 +513,7 @@ class _ProxyDBLogger(CustomLogger):
                 project_id=user_api_key_dict.project_id,
             )
 
-    async def _PROXY_track_cost_callback(
+    async def _PROXY_track_cost_callback(  # noqa: C901  # upstream's function, one branch past the limit with the fork's unbilled-call exit
         self,
         kwargs,  # kwargs to completion
         completion_response: litellm.ModelResponse | object | None,  # response from completion
@@ -598,8 +600,8 @@ class _ProxyDBLogger(CustomLogger):
             if (
                 not video_cost_poll
                 and is_unbilled_non_inference_call_from_params(
-                    kwargs.get("call_type"),
-                    litellm_params,
+                    kwargs.get("call_type"),  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]  # kwargs is a bare dict upstream
+                    litellm_params,  # pyright: ignore[reportUnknownArgumentType]  # litellm_params is a bare dict upstream
                     completion_response,
                 )
                 and _is_zero_response_cost(response_cost)
@@ -607,7 +609,7 @@ class _ProxyDBLogger(CustomLogger):
                 await _release_budget_reservation(budget_reservation=budget_reservation)
                 verbose_proxy_logger.debug(
                     "Cost tracking - skipping spend log for unbilled call_type=%s",
-                    kwargs.get("call_type"),
+                    kwargs.get("call_type"),  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]  # kwargs is a bare dict upstream
                 )
                 return
             tags: Final = _get_request_tags_for_cost_tracking(

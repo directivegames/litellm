@@ -10,7 +10,7 @@ from functools import reduce
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, Literal, Protocol, cast, runtime_checkable
 
-from pydantic import BaseModel, JsonValue, TypeAdapter, ValidationError
+from pydantic import BaseModel, Field, JsonValue, TypeAdapter, ValidationError
 
 import litellm
 from litellm._logging import verbose_proxy_logger
@@ -306,11 +306,18 @@ BACKGROUND_RESPONSE_COST_REQUEST_ID_SUFFIX: Final = "_background_cost"
 VIDEO_COST_REQUEST_ID_SUFFIX: Final = "_video_cost"
 
 
+class _VideoPollMetadata(BaseModel, frozen=True):
+    """Only the call-origin key of the request metadata; the rest is not copied."""
+
+    origin: object = Field(default=None, alias=INTERNAL_CALL_ORIGIN_METADATA_KEY)
+
+
 def _is_background_video_cost_poll(kwargs: Mapping[str, object]) -> bool:
-    metadata: Final = get_litellm_metadata_from_kwargs(dict(kwargs))
-    if not isinstance(metadata, Mapping):
+    metadata: Final[object] = get_litellm_metadata_from_kwargs(dict(kwargs))
+    try:
+        return _VideoPollMetadata.model_validate(metadata).origin == BACKGROUND_VIDEO_COST_POLL_CALL_ORIGIN
+    except ValidationError:
         return False
-    return metadata.get(INTERNAL_CALL_ORIGIN_METADATA_KEY) == BACKGROUND_VIDEO_COST_POLL_CALL_ORIGIN
 
 
 def _cost_row_request_id_suffix(call_type: str, metadata: Mapping[str, object]) -> str:
@@ -340,7 +347,7 @@ def get_spend_logs_id(
         return None
     # The create row already owns this video id. SpendLogs skips duplicate primary keys,
     # so the finish row would be dropped and the cost would never appear.
-    if _is_background_video_cost_poll(kwargs):
+    if _is_background_video_cost_poll(kwargs):  # pyright: ignore[reportUnknownArgumentType]  # kwargs is a bare dict upstream
         return f"{resolved_id}{VIDEO_COST_REQUEST_ID_SUFFIX}"
     return f"{resolved_id}{_cost_row_request_id_suffix(call_type, metadata)}"
 

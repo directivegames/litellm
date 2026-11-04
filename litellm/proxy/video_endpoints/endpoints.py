@@ -134,7 +134,7 @@ async def video_generation(
             )
             if not isinstance(hold, VideoBudgetHold):
                 raise_video_budget_refusal(hold)
-            metadata: Final = metadata_with_estimate(data.get("metadata"), hold)
+            metadata: Final = metadata_with_estimate(data.get("metadata"), hold)  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]  # data is a bare dict upstream
             if metadata is not None:
                 data["metadata"] = dict(metadata)
             generated: Final[object] = await processor.base_process_llm_request(

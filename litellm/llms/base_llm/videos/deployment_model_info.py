@@ -50,7 +50,7 @@ def deployment_pricing_model_info(litellm_params: GenericLiteLLMParams) -> Mappi
     set_params: Final = _fields(litellm_params.model_dump(exclude_none=True))
     return MappingProxyType(
         {
-            **_fields(litellm_params.model_info),
+            **_fields(getattr(litellm_params, "model_info", None)),
             **{key: value for key, value in set_params.items() if _is_pricing_key(key)},
         }
     )

@@ -30,7 +30,14 @@ from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final, NoReturn, TypeAlias, assert_never, cast  # noqa: TID251  # request metadata is untyped JSON; the one cast carries cast-ok
+from typing import (
+    TYPE_CHECKING,
+    Final,
+    NoReturn,
+    TypeAlias,
+    assert_never,
+    cast,  # noqa: TID251  # request metadata is untyped JSON; the one cast carries cast-ok
+)
 
 from pydantic import ValidationError
 

@@ -42,7 +42,12 @@ import math
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final, Protocol, cast  # noqa: TID251  # Prisma rows and logging params are untyped; each cast carries cast-ok
+from typing import (
+    TYPE_CHECKING,
+    Final,
+    Protocol,
+    cast,  # noqa: TID251  # Prisma rows and logging params are untyped; each cast carries cast-ok
+)
 from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError

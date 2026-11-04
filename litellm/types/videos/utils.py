@@ -8,7 +8,10 @@ Format: vid_{base64_encoded_string}
 import base64
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Final, cast  # noqa: TID251  # stamp_provider_task_id writes into the logging object's own untyped dicts
+from typing import (
+    Final,
+    cast,  # noqa: TID251  # stamp_provider_task_id writes into the logging object's own untyped dicts
+)
 
 from pydantic import TypeAdapter, ValidationError
 
