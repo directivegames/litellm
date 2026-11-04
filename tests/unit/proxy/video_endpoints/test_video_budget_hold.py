@@ -16,7 +16,6 @@ from litellm.proxy._types import UserAPIKeyAuth
 from litellm.proxy.video_endpoints.check_video_cost import record_pending_video_job, unbilled_video_estimate
 from litellm.proxy.video_endpoints.video_budget_hold import (
     MAX_COST_PER_VIDEO_JOB_KEY,
-    MINIMAX_LONGEST_SECONDS,
     NoVideoEstimate,
     VideoBudgetHold,
     VideoOverBudget,
@@ -30,21 +29,12 @@ from litellm.types.router import Deployment
 from litellm.types.videos.main import VideoObject
 from litellm.types.videos.utils import VIDEO_COST_POLL_ID_KEY, VIDEO_ESTIMATED_COST_KEY, encode_video_id_with_provider
 
-MINIMAX_RATE: Final = 0.08
-MINIMAX_IMAGE_RATE: Final = 0.04
 SEEDANCE_PLAIN_RATE: Final = 0.0000107
 SEEDANCE_VIDEO_RATE: Final = 0.0000064
 MINIMAX: Final = {
     "model_name": "minimax/hailuo-3",
     "litellm_params": {"model": "minimax/MiniMax-H3", "api_key": "mm-key"},
-    "model_info": {
-        "id": "mm-dep",
-        "mode": "video_generation",
-        "output_cost_per_second_768p": MINIMAX_RATE,
-        "input_cost_per_video_per_second_768p": MINIMAX_RATE,
-        "input_cost_per_image": MINIMAX_IMAGE_RATE,
-        "free_input_image_count": 1,
-    },
+    "model_info": {"id": "mm-dep", "mode": "video_generation", MAX_COST_PER_VIDEO_JOB_KEY: 2.5},
 }
 SEEDANCE: Final = {
     "model_name": "bytedance/seedance-2.5",
@@ -63,7 +53,6 @@ OPENROUTER: Final = {
     "model_info": {"id": "or-dep", "mode": "video_generation"},
 }
 INPUT_VIDEO: Final = {"type": "video_url", "video_url": {"url": "https://cdn.example/in.mp4"}}
-IMAGE: Final = {"type": "image_url", "image_url": {"url": "https://cdn.example/in.png"}}
 
 
 class FakeJobTable:
@@ -113,29 +102,17 @@ def _prisma(table: FakeJobTable) -> SimpleNamespace:
 
 async def _record(table: FakeJobTable, caller: UserAPIKeyAuth, task_id: str, estimate: float | None) -> None:
     video: Final = VideoObject(
-        id=encode_video_id_with_provider(task_id, "minimax", "mm-dep"), object="video", status="queued", created_at=0
+        id=encode_video_id_with_provider(task_id, "byteplus", "bp-dep"), object="video", status="queued", created_at=0
     )
     video._hidden_params[VIDEO_COST_POLL_ID_KEY] = task_id
     await record_pending_video_job(video, caller, {}, _prisma(table), SimpleNamespace(), estimated_cost=estimate)
 
 
 class TestEstimate:
-    def test_minimax_is_the_output_rate_times_the_seconds_plus_images_past_the_free_ones(self) -> None:
-        request: Final = {
-            "model": "minimax/hailuo-3",
-            "resolution": "768P",
-            "duration": 6,
-            "content": [IMAGE, IMAGE, IMAGE],
-        }
+    def test_a_minimax_deployment_holds_nothing_even_with_a_ceiling(self) -> None:
+        estimate: Final = estimate_video_job_cost({"resolution": "768p", "duration": 6}, (_deployment(MINIMAX),))
 
-        estimate: Final = estimate_video_job_cost(request, (_deployment(MINIMAX),))
-
-        assert estimate == Decimal(str(MINIMAX_RATE)) * 6 + Decimal(str(MINIMAX_IMAGE_RATE)) * 2
-
-    def test_a_request_with_no_duration_is_priced_at_the_longest_job(self) -> None:
-        estimate: Final = estimate_video_job_cost({"resolution": "768p"}, (_deployment(MINIMAX),))
-
-        assert estimate == Decimal(str(MINIMAX_RATE)) * MINIMAX_LONGEST_SECONDS
+        assert estimate == Decimal(0), "upstream's MiniMax adapter bills at create, so nothing is left to hold"
 
     def test_seedance_grows_with_the_seconds_and_counts_an_input_video_at_its_own_rate(self) -> None:
         deployments: Final = (_deployment(SEEDANCE),)
@@ -160,14 +137,18 @@ class TestEstimate:
 
     def test_the_dearest_deployment_of_a_model_name_sets_the_estimate(self) -> None:
         cheap: Final = {
-            **MINIMAX,
-            "model_info": {**MINIMAX["model_info"], "id": "cheap", "output_cost_per_second_768p": 0.01},
+            **SEEDANCE,
+            "model_info": {
+                **SEEDANCE["model_info"],
+                "id": "cheap",
+                "output_cost_per_video_token_without_video_input_720p": SEEDANCE_PLAIN_RATE / 2,
+            },
         }
-        request: Final = {"resolution": "768p", "duration": 6}
+        request: Final = {"resolution": "720p", "duration": 6}
 
-        both: Final = estimate_video_job_cost(request, (_deployment(cheap), _deployment(MINIMAX)))
+        both: Final = estimate_video_job_cost(request, (_deployment(cheap), _deployment(SEEDANCE)))
 
-        assert both == estimate_video_job_cost(request, (_deployment(MINIMAX),))
+        assert both == estimate_video_job_cost(request, (_deployment(SEEDANCE),))
 
     def test_a_provider_with_no_rate_needs_a_ceiling_and_then_uses_it(self) -> None:
         with_ceiling: Final = {
@@ -176,28 +157,28 @@ class TestEstimate:
         }
 
         assert estimate_video_job_cost({"duration": 5}, (_deployment(OPENROUTER),)) is None
-        assert estimate_video_job_cost({"duration": 5}, (_deployment(MINIMAX), _deployment(OPENROUTER))) is None
+        assert estimate_video_job_cost({"duration": 5}, (_deployment(SEEDANCE), _deployment(OPENROUTER))) is None
         assert estimate_video_job_cost({"duration": 5}, (_deployment(with_ceiling),)) == Decimal("2.5")
 
 
 class TestHold:
     @pytest.mark.asyncio
     async def test_a_create_that_fits_the_budget_is_held_at_its_estimate(self) -> None:
-        router: Final = Router(model_list=[MINIMAX])
-        request: Final = {"model": "minimax/hailuo-3", "resolution": "768p", "duration": 6}
+        router: Final = Router(model_list=[SEEDANCE])
+        request: Final = {"model": "bytedance/seedance-2.5", "resolution": "720p", "duration": 6}
 
         hold: Final = await hold_video_budget(_caller(), request, router, _prisma(FakeJobTable()), _spend({}))
 
         assert hold == VideoBudgetHold(
-            estimated_cost=float(estimate_video_job_cost(request, (_deployment(MINIMAX),)) or 0)
+            estimated_cost=float(estimate_video_job_cost(request, (_deployment(SEEDANCE),)) or 0)
         )
 
     @pytest.mark.asyncio
     async def test_jobs_not_yet_billed_count_against_the_team_and_billed_ones_do_not(self) -> None:
-        router: Final = Router(model_list=[MINIMAX])
+        router: Final = Router(model_list=[SEEDANCE])
         table: Final = FakeJobTable()
-        request: Final = {"model": "minimax/hailuo-3", "resolution": "768p", "duration": 10}
-        estimate: Final = float(estimate_video_job_cost(request, (_deployment(MINIMAX),)) or 0)
+        request: Final = {"model": "bytedance/seedance-2.5", "resolution": "720p", "duration": 10}
+        estimate: Final = float(estimate_video_job_cost(request, (_deployment(SEEDANCE),)) or 0)
         caller: Final = _caller(team_max_budget=estimate * 2.5)
         await _record(table, caller, "running-1", estimate)
         await _record(table, _caller(key="other-key"), "running-2", estimate)
@@ -213,9 +194,9 @@ class TestHold:
 
     @pytest.mark.asyncio
     async def test_spend_already_counted_refuses_a_create_that_would_pass_the_key_budget(self) -> None:
-        router: Final = Router(model_list=[MINIMAX])
-        request: Final = {"model": "minimax/hailuo-3", "resolution": "768p", "duration": 6}
-        estimate: Final = float(estimate_video_job_cost(request, (_deployment(MINIMAX),)) or 0)
+        router: Final = Router(model_list=[SEEDANCE])
+        request: Final = {"model": "bytedance/seedance-2.5", "resolution": "720p", "duration": 6}
+        estimate: Final = float(estimate_video_job_cost(request, (_deployment(SEEDANCE),)) or 0)
         caller: Final = _caller(team_max_budget=None, max_budget=1.0)
 
         fits: Final = await hold_video_budget(
@@ -227,6 +208,22 @@ class TestHold:
 
         assert isinstance(fits, VideoBudgetHold)
         assert isinstance(refused, VideoOverBudget) and refused.entity_type == "key"
+
+    @pytest.mark.asyncio
+    async def test_a_minimax_create_is_refused_only_once_the_budget_is_already_spent(self) -> None:
+        router: Final = Router(model_list=[MINIMAX])
+        request: Final = {"model": "minimax/hailuo-3", "duration": 6}
+        caller: Final = _caller(team_max_budget=None, max_budget=1.0)
+
+        fits: Final = await hold_video_budget(
+            caller, request, router, _prisma(FakeJobTable()), _spend({"spend:key:hashed-key": 1.0})
+        )
+        refused: Final = await hold_video_budget(
+            caller, request, router, _prisma(FakeJobTable()), _spend({"spend:key:hashed-key": 1.01})
+        )
+
+        assert fits == VideoBudgetHold(estimated_cost=0.0)
+        assert isinstance(refused, VideoOverBudget) and refused.estimate == 0.0
 
     @pytest.mark.asyncio
     async def test_a_model_with_no_estimate_is_refused_only_while_a_budget_applies(self) -> None:
@@ -243,10 +240,10 @@ class TestHold:
 
     @pytest.mark.asyncio
     async def test_concurrent_creates_for_one_team_cannot_all_pass_on_the_same_total(self) -> None:
-        router: Final = Router(model_list=[MINIMAX])
+        router: Final = Router(model_list=[SEEDANCE])
         table: Final = FakeJobTable()
-        request: Final = {"model": "minimax/hailuo-3", "resolution": "768p", "duration": 10}
-        estimate: Final = float(estimate_video_job_cost(request, (_deployment(MINIMAX),)) or 0)
+        request: Final = {"model": "bytedance/seedance-2.5", "resolution": "720p", "duration": 10}
+        estimate: Final = float(estimate_video_job_cost(request, (_deployment(SEEDANCE),)) or 0)
         caller: Final = _caller(team_max_budget=estimate * 3.5)
 
         async def create(task_id: str) -> bool:

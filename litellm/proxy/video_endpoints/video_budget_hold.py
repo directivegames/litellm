@@ -6,10 +6,11 @@ prices the request at the most expensive deployment its model name can route to,
 the caller's jobs not yet billed, and refuses when that would pass a max budget. The estimate is stored
 on the pending job (PollRecord.estimated_cost) and, through metadata_with_estimate, on the create log row.
 
-Per deployment, the estimate is model_info.max_cost_per_video_job when set. Otherwise MiniMax is the output
-rate times the requested seconds plus images past the free count, and BytePlus Seedance is its published
-token count, (input video seconds + output seconds) x width x height x 24 fps / 1024, at the widest frame
-for the resolution, counting an input video as long as the output. Other providers have no estimate.
+A MiniMax deployment holds nothing: upstream's MiniMax adapter bills the job at create, so its spend already
+counts. For any other deployment the estimate is model_info.max_cost_per_video_job when set. Otherwise
+BytePlus Seedance is its published token count, (input video seconds + output seconds) x width x height x
+24 fps / 1024, at the widest frame for the resolution, counting an input video as long as the output. Other
+providers have no estimate.
 
 video_budget_locks serializes creates per Team and per key within one process. Separate processes can
 still each pass one job on the same total.
@@ -34,7 +35,6 @@ from pydantic import ValidationError
 import litellm
 from litellm.llms.base_llm.videos.deployment_model_info import deployment_pricing_model_info
 from litellm.llms.byteplus.videos.transformation import RATE_KEYS, seedance_input_kind, seedance_rate
-from litellm.llms.minimax.videos.transformation import OUTPUT_PER_SECOND_KEY, minimax_rates
 from litellm.proxy._types import ProxyException
 from litellm.proxy.video_endpoints.check_video_cost import unbilled_video_estimate
 from litellm.types.router import Deployment, GenericLiteLLMParams
@@ -51,8 +51,7 @@ SEEDANCE_PIXELS_PER_TOKEN: Final = Decimal(1024)
 SEEDANCE_WIDEST_RATIO: Final = Decimal(21) / Decimal(9)
 SEEDANCE_SHORT_SIDE: Final = MappingProxyType({"480p": 480, "720p": 720, "1080p": 1080, "2k": 1440, "4k": 2160})
 SEEDANCE_LONGEST_SECONDS: Final = Decimal(15)
-MINIMAX_LONGEST_SECONDS: Final = Decimal(10)
-MINIMAX_IMAGE_ITEM_TYPES: Final = frozenset({"image", "image_url", "first_frame_image", "last_frame_image"})
+BILLED_AT_CREATE_PROVIDERS: Final = frozenset({"minimax"})
 
 _LOCKS: Final[weakref.WeakValueDictionary[str, asyncio.Lock]] = weakref.WeakValueDictionary()
 
@@ -250,6 +249,9 @@ def _deployments(llm_router: "Router", model: str, team_id: str | None) -> tuple
 
 
 def _deployment_estimate(request_data: Mapping[str, object], deployment: Deployment) -> Decimal | None:
+    provider: Final = deployment.litellm_params.custom_llm_provider or deployment.litellm_params.model.split("/", 1)[0]
+    if provider in BILLED_AT_CREATE_PROVIDERS:
+        return Decimal(0)
     pricing: Final = deployment_pricing_model_info(
         GenericLiteLLMParams.model_validate(
             MappingProxyType(
@@ -263,32 +265,9 @@ def _deployment_estimate(request_data: Mapping[str, object], deployment: Deploym
     ceiling: Final = _dollars(pricing.get(MAX_COST_PER_VIDEO_JOB_KEY))
     if ceiling is not None:
         return ceiling
-    provider: Final = deployment.litellm_params.custom_llm_provider or deployment.litellm_params.model.split("/", 1)[0]
-    if provider == "minimax":
-        return _minimax_estimate(request_data, pricing)
     if provider == "byteplus":
         return _seedance_estimate(request_data, pricing)
     return None
-
-
-def _minimax_estimate(request_data: Mapping[str, object], pricing: Mapping[str, object]) -> Decimal | None:
-    seconds: Final = _seconds(request_data, MINIMAX_LONGEST_SECONDS)
-    images: Final = sum(1 for item in _content_items(request_data) if _is_image_item(item)) + (
-        1 if request_data.get("input_reference") is not None else 0
-    )
-    costs: Final = tuple(
-        _minimax_cost(pricing, resolution, seconds, images)
-        for resolution in _resolutions(request_data, pricing, OUTPUT_PER_SECOND_KEY)
-    )
-    return max((cost for cost in costs if cost is not None), default=None)
-
-
-def _minimax_cost(pricing: Mapping[str, object], resolution: str, seconds: Decimal, images: int) -> Decimal | None:
-    try:
-        rates: Final = minimax_rates(pricing, resolution)
-    except ValueError:
-        return None
-    return rates.output_per_second * seconds + rates.per_image * max(images - rates.free_images, 0)
 
 
 def _seedance_estimate(request_data: Mapping[str, object], pricing: Mapping[str, object]) -> Decimal | None:
@@ -334,25 +313,6 @@ def _seconds(request_data: Mapping[str, object], longest: Decimal) -> Decimal:
     except InvalidOperation:
         return longest
     return seconds if seconds.is_finite() and seconds > 0 else longest
-
-
-def _content_items(request_data: Mapping[str, object]) -> tuple[Mapping[str, object], ...]:
-    content: Final = request_data.get("content")
-    if not isinstance(content, (list, tuple)):
-        return ()
-    items: Final = cast("Sequence[object]", content)  # cast-ok: request JSON
-    return tuple(mapping for mapping in map(_mapping, items) if mapping is not None)
-
-
-def _mapping(item: object) -> Mapping[str, object] | None:
-    if not isinstance(item, Mapping):
-        return None
-    return cast("Mapping[str, object]", item)  # cast-ok: request JSON
-
-
-def _is_image_item(item: Mapping[str, object]) -> bool:
-    kind: Final = item.get("type")
-    return isinstance(kind, str) and kind.lower() in MINIMAX_IMAGE_ITEM_TYPES
 
 
 def _dollars(value: object) -> Decimal | None:
