@@ -1,5 +1,6 @@
 """MiniMax video priced from the deployment's own rates, with reference video billed when the job ends."""
 
+from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import Final
 from unittest.mock import Mock
@@ -13,6 +14,7 @@ from litellm.llms.minimax.videos.transformation import MinimaxVideoConfig
 from litellm.types.router import GenericLiteLLMParams
 from litellm.types.videos.main import VideoObject
 from litellm.types.videos.utils import PROVIDER_TASK_ID_KEY, VIDEO_COST_POLL_ID_KEY
+from litellm.videos.utils import VideoGenerationRequestUtils
 
 API_BASE: Final = "https://api.minimax.io"
 H3_RATES: Final = {
@@ -74,6 +76,23 @@ def _status(task: dict, rates: dict = H3_RATES):
     return config.transform_video_status_retrieve_response(
         raw_response=_response({"task": task}), logging_obj=SimpleNamespace(litellm_params={})
     )
+
+
+def _request_params(call_kwargs: Mapping[str, object]) -> Mapping[str, object]:
+    return DeploymentPricedMinimaxVideoConfig().map_openai_params(
+        video_create_optional_params=VideoGenerationRequestUtils.get_requested_video_generation_optional_param(
+            dict(call_kwargs)
+        ),
+        model="MiniMax-H3",
+        drop_params=False,
+    )
+
+
+class TestRequestParams:
+    def test_the_deployments_rates_stay_out_of_the_request_sent_to_minimax(self) -> None:
+        caller: Final = {"seconds": "6", "resolution": "768P"}
+
+        assert _request_params({**caller, **H3_RATES, "free_input_image_count": 5}) == _request_params(caller)
 
 
 class TestReferenceVideo:

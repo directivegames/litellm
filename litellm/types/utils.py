@@ -3928,6 +3928,13 @@ class CustomPricingLiteLLMParams(MirroredPricingParams):
     output_cost_per_second_768p: float | None = None
     output_cost_per_second_2k: float | None = None
     output_cost_per_second_4k: float | None = None
+    input_cost_per_video_per_second_480p: float | None = None
+    input_cost_per_video_per_second_720p: float | None = None
+    input_cost_per_video_per_second_768p: float | None = None
+    input_cost_per_video_per_second_1080p: float | None = None
+    input_cost_per_video_per_second_2k: float | None = None
+    input_cost_per_video_per_second_4k: float | None = None
+    free_input_image_count: int | None = None
     output_cost_per_image_512: float | None = None
     output_cost_per_image_1024: float | None = None
     output_cost_per_image_1536: float | None = None
