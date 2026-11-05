@@ -31,6 +31,7 @@ from httpx._types import RequestFiles
 from pydantic import TypeAdapter, ValidationError
 
 import litellm
+from litellm.exceptions import UnsupportedParamsError
 from litellm.litellm_core_utils.url_utils import encode_url_path_segment
 from litellm.llms.base_llm.chat.transformation import BaseLLMException
 from litellm.llms.base_llm.videos.deployment_model_info import deployment_pricing_model_info
@@ -143,6 +144,25 @@ def split_rate_class(stored_id: str) -> tuple[str, str | None]:
     if separator == "" or kind not in RATE_KEYS or not task_id:
         return stored_id, None
     return task_id, kind
+
+
+def _is_text_item(item: object) -> bool:
+    kind: Final = _fields(item).get("type")
+    return isinstance(kind, str) and kind.lower() == "text"
+
+
+def _caller_media(content: object) -> tuple[object, ...]:
+    """
+    ``prompt`` is what guardrails scanned, so it is the only text BytePlus takes; a caller's ``content``
+    array only contributes media, never text that would bypass that check.
+    """
+    items: Final = _items(content)
+    if any(_is_text_item(item) for item in items):
+        raise UnsupportedParamsError(
+            message="content must hold only BytePlus image, video or audio items; pass the text of the request as prompt.",
+            llm_provider="byteplus",
+        )
+    return items
 
 
 def _is_video_item(item: object) -> bool:
@@ -337,8 +357,7 @@ class BytePlusVideoConfig(BaseVideoConfig):
         headers: dict[str, str],  # mutable-ok: BaseVideoConfig contract
     ) -> tuple[dict[str, object], RequestFiles, str]:  # mutable-ok: BaseVideoConfig contract
         params: Final = video_create_optional_request_params
-        content: Final = params.get("content")
-        items: Final = _items(content)
+        media: Final = _caller_media(params.get("content"))
         duration: Final = params.get("duration", params.get("seconds"))
         resolution: Final = params.get("resolution", params.get("size"))
         ratio: Final = params.get("ratio", params.get("aspect_ratio"))
@@ -352,7 +371,7 @@ class BytePlusVideoConfig(BaseVideoConfig):
         )
         body: Final[dict[str, object]] = {  # mutable-ok: BaseVideoConfig contract returns the body as a dict
             "model": model,
-            "content": list(items) if isinstance(content, list) else [{"type": "text", "text": prompt}],
+            "content": [*(({"type": "text", "text": prompt},) if prompt else ()), *media],
             **{key: value for key, value in optional if value is not None},
             **audio,
         }

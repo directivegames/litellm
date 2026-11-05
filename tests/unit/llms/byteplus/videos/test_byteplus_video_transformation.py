@@ -5,6 +5,7 @@ from unittest.mock import Mock, patch
 import httpx
 import pytest
 
+from litellm.exceptions import UnsupportedParamsError
 from litellm.llms.byteplus.videos.transformation import (
     BytePlusVideoConfig,
     seedance_completed_cost,
@@ -27,10 +28,13 @@ RATES: dict[str, object] = {
     "output_cost_per_video_token_without_video_input_1080p": 0.0000117,
     "output_cost_per_video_token_with_video_input_1080p": 0.000007,
 }
-_VIDEO_CONTENT: list[dict[str, object]] = [
-    {"type": "text", "text": "a boat"},
-    {"type": "video_url", "video_url": {"url": "https://cdn.example/in.mp4"}},
-]
+_VIDEO_ITEM: dict[str, object] = {"type": "video_url", "video_url": {"url": "https://cdn.example/in.mp4"}}
+_IMAGE_ITEM: dict[str, object] = {
+    "type": "image_url",
+    "image_url": {"url": "https://cdn.example/first.png"},
+    "role": "first_frame",
+}
+_VIDEO_CONTENT: list[dict[str, object]] = [{"type": "text", "text": "a boat"}, _VIDEO_ITEM]
 
 
 def _response(payload: dict) -> Mock:
@@ -104,11 +108,22 @@ class TestBytePlusVideoTransformation:
     def test_create_with_video_input_needs_the_video_input_rate(self) -> None:
         rates = {"output_cost_per_video_token_without_video_input_720p": 0.0000107}
         with pytest.raises(ValueError, match="output_cost_per_video_token_with_video_input_720p"):
-            _create(self.config, rates, {"content": _VIDEO_CONTENT, "resolution": "720p"})
+            _create(self.config, rates, {"content": [_VIDEO_ITEM], "resolution": "720p"})
 
     def test_create_without_video_input_needs_only_its_own_rate(self) -> None:
         data, _files, _url = _create(self.config, {"output_cost_per_video_token_without_video_input_480p": 0.0000107})
         assert data["content"] == [{"type": "text", "text": "a red boat"}]
+
+    def test_create_sends_the_prompt_as_the_only_text_beside_the_callers_media(self) -> None:
+        data, _files, _url = _create(self.config, RATES, {"content": [_IMAGE_ITEM, _VIDEO_ITEM], "resolution": "480p"})
+
+        assert data["content"] == [{"type": "text", "text": "a red boat"}, _IMAGE_ITEM, _VIDEO_ITEM]
+
+    def test_create_refuses_text_in_content_that_would_replace_the_prompt(self) -> None:
+        content = [{"type": "text", "text": "not the prompt"}, _VIDEO_ITEM]
+
+        with pytest.raises(UnsupportedParamsError, match="prompt"):
+            _create(self.config, RATES, {"content": content, "resolution": "480p"})
 
     def test_create_fails_without_a_rate_for_the_requested_resolution(self) -> None:
         with pytest.raises(ValueError, match="output_cost_per_video_token_without_video_input_4k"):
