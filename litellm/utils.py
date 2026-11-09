@@ -93,7 +93,11 @@ from litellm.litellm_core_utils.get_model_cost_map import AliasedCostEntry
 from litellm.litellm_core_utils.model_param_helper import peek_reasoning_summary_aliases
 from litellm.litellm_core_utils.sensitive_data_masker import redact_credentials_in_payload
 from litellm.litellm_core_utils.tokenizer import strip_special_tokens
-from litellm.litellm_core_utils.tool_fields import MalformedField, resolve_deployment_tool_fields
+from litellm.litellm_core_utils.tool_fields import (
+    MalformedField,
+    resolve_deployment_tool_fields,
+    tools_without_hosted_mcp,
+)
 from litellm.rust_bridge import tokenizer as tokenizer_dispatch
 from litellm.rust_bridge.catalog import decision
 from litellm.rust_bridge.configuration import Decision
@@ -434,6 +438,7 @@ if TYPE_CHECKING:
     )
     from litellm.llms.cohere.common_utils import CohereModelInfo
     from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler, HTTPHandler
+    from litellm.llms.custom_llm import CustomLLM
     from litellm.router_utils.get_retry_from_policy import (
         get_num_retries_from_retry_policy,
         reset_retry_policy,
@@ -4689,7 +4694,12 @@ def remove_sensitive_keys_from_dict(d: dict) -> dict:
     return d
 
 
-def pre_process_optional_params(passed_params: dict, non_default_params: dict, custom_llm_provider: str) -> dict:
+_TOOL_LIST: Final = TypeAdapter(list[object])
+
+
+def pre_process_optional_params(
+    passed_params: dict, non_default_params: dict, custom_llm_provider: str, model: str, drop_params: bool | None
+) -> dict:
     """For .completion(), preprocess optional params"""
     optional_params: dict = {}
 
@@ -4746,14 +4756,20 @@ def pre_process_optional_params(passed_params: dict, non_default_params: dict, c
             and custom_llm_provider not in litellm.openai_compatible_providers
         ):
             if custom_llm_provider == "ollama":
+                if "tools" in non_default_params:
+                    sent_tools: Final = _TOOL_LIST.validate_python(non_default_params.pop("tools"))
+                    non_default_params.pop("tool_choice", None)  # causes ollama requests to hang
+                    prompt_tools: Final = tools_without_hosted_mcp(
+                        sent_tools, model=model, route=custom_llm_provider, drop_params=bool(drop_params)
+                    )
+                    if sent_tools and not prompt_tools:
+                        return optional_params
+                    optional_params["functions_unsupported_model"] = prompt_tools
+                elif "functions" in non_default_params:
+                    optional_params["functions_unsupported_model"] = non_default_params.pop("functions")
                 # ollama actually supports json output
                 optional_params["format"] = "json"
                 litellm.add_function_to_prompt = True  # so that main.py adds the function call to the prompt
-                if "tools" in non_default_params:
-                    optional_params["functions_unsupported_model"] = non_default_params.pop("tools")
-                    non_default_params.pop("tool_choice", None)  # causes ollama requests to hang
-                elif "functions" in non_default_params:
-                    optional_params["functions_unsupported_model"] = non_default_params.pop("functions")
             elif litellm.add_function_to_prompt:  # if user opts to add it to prompt instead
                 optional_params["functions_unsupported_model"] = non_default_params.pop(
                     "tools", non_default_params.pop("functions", None)
@@ -4811,6 +4827,7 @@ def get_optional_params(
     store: bool | None = None,
     prompt_cache_key: str | None = None,
     base_model: str | None = None,
+    model_info: Mapping[str, object] | None = None,
     **kwargs: object,
 ):
     drop_params = normalize_drop_params(drop_params)  # rebind-ok: config and DB deployments pass "true" as a string
@@ -4821,6 +4838,7 @@ def get_optional_params(
     # non_default_params / _check_valid_arg — it's a routing hint, not an
     # OpenAI param.
     passed_params.pop("base_model", None)
+    passed_params.pop("model_info", None)
     provider_config: BaseConfig | None = None
     if custom_llm_provider is not None and custom_llm_provider in [provider.value for provider in LlmProviders]:
         provider_config = ProviderConfigManager.get_provider_chat_config(
@@ -4840,6 +4858,8 @@ def get_optional_params(
         passed_params=passed_params,
         non_default_params=non_default_params,
         custom_llm_provider=custom_llm_provider,
+        model=model,
+        drop_params=drop_params,
     )
 
     def _check_valid_arg(supported_params: list[str]):
@@ -5060,6 +5080,7 @@ def get_optional_params(
                 non_default_params=non_default_params,
                 optional_params=optional_params,
                 drop_params=bool(drop_params),
+                model_info=model_info,
             )
         elif bedrock_route == "openai":
             optional_params = litellm.AmazonBedrockOpenAIConfig().map_openai_params(
@@ -5077,7 +5098,7 @@ def get_optional_params(
                     drop_params=bool(drop_params),
                 )
             else:
-                optional_params = litellm.AmazonAnthropicClaudeConfig().map_openai_params(
+                optional_params = litellm.AmazonAnthropicClaudeConfig(model_info=model_info).map_openai_params(
                     non_default_params=non_default_params,
                     optional_params=optional_params,
                     model=model,
@@ -6542,6 +6563,13 @@ def get_model_info_helper(
                 ),
                 cache_read_input_token_cost=_model_info.get("cache_read_input_token_cost", None),
                 cache_read_input_audio_token_cost=_model_info.get("cache_read_input_audio_token_cost", None),
+                cache_read_input_audio_token_cost_flex=_model_info.get("cache_read_input_audio_token_cost_flex", None),
+                cache_read_input_audio_token_cost_priority=_model_info.get(
+                    "cache_read_input_audio_token_cost_priority", None
+                ),
+                cache_read_input_audio_token_cost_batches=_model_info.get(
+                    "cache_read_input_audio_token_cost_batches", None
+                ),
                 prompt_cache_min_tokens=_model_info.get("prompt_cache_min_tokens", None),
                 cache_read_input_token_cost_above_200k_tokens=_model_info.get(
                     "cache_read_input_token_cost_above_200k_tokens", None
@@ -6608,6 +6636,20 @@ def get_model_info_helper(
                 input_cost_per_second=_model_info.get("input_cost_per_second", None),
                 input_cost_per_text_message=_model_info.get("input_cost_per_text_message", None),
                 input_cost_per_audio_token=_model_info.get("input_cost_per_audio_token", None),
+                input_cost_per_audio_token_flex=_model_info.get("input_cost_per_audio_token_flex", None),
+                input_cost_per_audio_token_above_200k_tokens=_model_info.get(
+                    "input_cost_per_audio_token_above_200k_tokens", None
+                ),
+                input_cost_per_audio_token_above_200k_tokens_flex=_model_info.get(
+                    "input_cost_per_audio_token_above_200k_tokens_flex", None
+                ),
+                input_cost_per_audio_token_above_200k_tokens_priority=_model_info.get(
+                    "input_cost_per_audio_token_above_200k_tokens_priority", None
+                ),
+                input_cost_per_audio_token_above_200k_tokens_batches=_model_info.get(
+                    "input_cost_per_audio_token_above_200k_tokens_batches", None
+                ),
+                input_cost_per_audio_token_priority=_model_info.get("input_cost_per_audio_token_priority", None),
                 input_cost_per_image_token=_model_info.get("input_cost_per_image_token", None),
                 input_cost_per_video_token=_model_info.get("input_cost_per_video_token", None),
                 input_cost_per_audio_token_batches=_model_info.get("input_cost_per_audio_token_batches", None),
@@ -6620,12 +6662,18 @@ def get_model_info_helper(
                 input_cost_per_token_above_200k_tokens_batches=_model_info.get(
                     "input_cost_per_token_above_200k_tokens_batches"
                 ),
+                input_cost_per_token_above_200k_tokens_flex=_model_info.get(
+                    "input_cost_per_token_above_200k_tokens_flex", None
+                ),
                 input_cost_per_token_above_272k_tokens_batches=_model_info.get(
                     "input_cost_per_token_above_272k_tokens_batches"
                 ),
                 output_cost_per_token_batches=_model_info.get("output_cost_per_token_batches"),
                 output_cost_per_token_above_200k_tokens_batches=_model_info.get(
                     "output_cost_per_token_above_200k_tokens_batches"
+                ),
+                output_cost_per_token_above_200k_tokens_flex=_model_info.get(
+                    "output_cost_per_token_above_200k_tokens_flex", None
                 ),
                 output_cost_per_token_above_272k_tokens_batches=_model_info.get(
                     "output_cost_per_token_above_272k_tokens_batches"
@@ -6688,6 +6736,7 @@ def get_model_info_helper(
                 output_cost_per_pixel=_model_info.get("output_cost_per_pixel", None),
                 output_cost_per_image_token=_model_info.get("output_cost_per_image_token", None),
                 output_cost_per_image_token_batches=_model_info.get("output_cost_per_image_token_batches", None),
+                output_cost_per_image_token_priority=_model_info.get("output_cost_per_image_token_priority", None),
                 output_cost_per_video_token=_model_info.get("output_cost_per_video_token", None),
                 output_vector_size=_model_info.get("output_vector_size", None),
                 citation_cost_per_token=_model_info.get("citation_cost_per_token", None),
@@ -6713,6 +6762,9 @@ def get_model_info_helper(
                 supports_embedding_image_input=_model_info.get("supports_embedding_image_input", None),
                 supports_native_streaming=_model_info.get("supports_native_streaming", None),
                 supports_native_structured_output=_model_info.get("supports_native_structured_output", None),
+                supports_bedrock_native_structured_output=_model_info.get(
+                    "supports_bedrock_native_structured_output", None
+                ),
                 supports_web_search=_model_info.get("supports_web_search", None),
                 supports_url_context=_model_info.get("supports_url_context", None),
                 supports_reasoning=_model_info.get("supports_reasoning", None),
@@ -6720,6 +6772,7 @@ def get_model_info_helper(
                 supports_legacy_thinking=_model_info.get("supports_legacy_thinking", None),
                 thinking_always_on=_model_info.get("thinking_always_on", None),
                 supports_tool_search=_model_info.get("supports_tool_search", None),
+                supports_per_turn_control=_model_info.get("supports_per_turn_control", None),
                 supports_mid_conversation_system=_model_info.get("supports_mid_conversation_system", None),
                 supports_anthropic_thinking_payload=_model_info.get("supports_anthropic_thinking_payload", None),
                 supports_anthropic_compaction=_model_info.get("supports_anthropic_compaction", None),
@@ -10140,8 +10193,13 @@ class ProviderConfigManager:
     @staticmethod
     def get_provider_video_config(
         model: str | None,
-        provider: LlmProviders,
+        provider: LlmProviders | str,
     ) -> BaseVideoConfig | None:
+        if not isinstance(provider, LlmProviders):
+            custom_video_config: Final = ProviderConfigManager.get_custom_provider_video_config(provider)
+            if custom_video_config is not None or provider not in LlmProvidersSet:
+                return custom_video_config
+            return ProviderConfigManager.get_provider_video_config(model=model, provider=LlmProviders(provider))
         if LlmProviders.OPENAI == provider:
             from litellm.llms.openai.videos.transformation import OpenAIVideoConfig
 
@@ -10195,6 +10253,34 @@ class ProviderConfigManager:
 
             return OpenRouterVideoConfig()
         return None
+
+    @staticmethod
+    def get_custom_llm_handler(provider: str | None) -> CustomLLM | None:
+        """The `CustomLLM` registered for `provider` in `litellm.custom_provider_map`, if its handler is one."""
+        from litellm.llms.custom_llm import CustomLLM
+
+        return next(
+            (
+                item["custom_handler"]
+                for item in litellm.custom_provider_map
+                if item["provider"] == provider and isinstance(item["custom_handler"], CustomLLM)
+            ),
+            None,
+        )
+
+    @staticmethod
+    def get_custom_provider_video_config(provider: str) -> BaseVideoConfig | None:
+        """The `BaseVideoConfig` registered for `provider` in `litellm.custom_provider_map`, if its handler is one."""
+        from litellm.llms.base_llm.videos.transformation import BaseVideoConfig
+
+        return next(
+            (
+                item["custom_handler"]
+                for item in litellm.custom_provider_map
+                if item["provider"] == provider and isinstance(item["custom_handler"], BaseVideoConfig)
+            ),
+            None,
+        )
 
     @staticmethod
     def get_provider_container_config(

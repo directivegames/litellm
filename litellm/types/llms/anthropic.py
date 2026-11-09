@@ -209,6 +209,13 @@ class AnthropicMessagesTextParam(TypedDict, total=False):
     prompt_cache_breakpoint: ReadOnly[PromptCacheBreakpoint]
 
 
+class AnthropicSearchResultParam(TypedDict, total=False):
+    type: Required[ReadOnly[Literal["search_result"]]]
+    source: Required[ReadOnly[str]]
+    title: Required[ReadOnly[str]]
+    content: Required[ReadOnly[Iterable[AnthropicMessagesTextParam]]]
+
+
 class AnthropicMessagesToolUseParam(TypedDict, total=False):
     type: Required[Literal["tool_use"]]
     id: str
@@ -357,6 +364,7 @@ class AnthropicMessagesToolResultParam(TypedDict, total=False):
             AnthropicMessagesToolResultContent
             | AnthropicMessagesImageParam
             | AnthropicMessagesDocumentParam
+            | AnthropicSearchResultParam
             | ToolReference
         ]
     )
@@ -368,6 +376,7 @@ AnthropicMessagesUserMessageValues = (
     | AnthropicMessagesImageParam
     | AnthropicMessagesToolResultParam
     | AnthropicMessagesDocumentParam
+    | AnthropicSearchResultParam
     | AnthropicMessagesContainerUploadParam
 )
 
@@ -798,6 +807,7 @@ class ANTHROPIC_BETA_HEADER_VALUES(str, Enum):
     ADVISOR_TOOL_2026_03_01 = "advisor-tool-2026-03-01"
     PER_TURN_CONTROL_2026_07_01 = "per-turn-control-2026-07-01"
     DANGEROUS_TOOL_USE_2026_09_03 = "dangerous-tool-use-2026-09-03"
+    MCP_CLIENT_2025_04_04 = "mcp-client-2025-04-04"
 
 
 # Tool search beta header constant (for Anthropic direct API and Microsoft Foundry)

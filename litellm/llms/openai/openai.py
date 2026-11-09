@@ -1,3 +1,4 @@
+import inspect
 import time
 import types
 from collections.abc import AsyncIterator, Callable, Coroutine, Iterable, Iterator, Mapping
@@ -11,13 +12,14 @@ if TYPE_CHECKING:
     from litellm.litellm_core_utils.tokenizer import Encoding as Tokenizer
 
 import openai
-from openai import AsyncOpenAI, OpenAI
+from openai import AsyncOpenAI, AsyncStream, OpenAI, Stream
 from openai._base_client import make_request_options
 from openai._constants import RAW_RESPONSE_HEADER
 from openai._legacy_response import LegacyAPIResponse
 from openai._types import RequestOptions
 from openai.types import CreateEmbeddingResponse
 from openai.types.beta.assistant_deleted import AssistantDeleted
+from openai.types.chat import ChatCompletion, ChatCompletionChunk
 from openai.types.file_deleted import FileDeleted
 from pydantic import BaseModel, TypeAdapter
 from typing_extensions import overload
@@ -350,9 +352,21 @@ _EXTRA_HEADERS_ADAPTER: Final = TypeAdapter(dict[str, str] | None)
 _EXTRA_QUERY_ADAPTER: Final = TypeAdapter(dict[str, object] | None)
 _NO_EXTRA_HEADERS: Final[Mapping[str, str]] = types.MappingProxyType({})
 _SDK_OPTION_KEYS: Final = frozenset(("extra_headers", "extra_query", "extra_body"))
+_CLIENT_API_KEY_ONLY_AUTH: Final[Mapping[str, Mapping[str, bool]]] = (
+    types.MappingProxyType({"security": types.MappingProxyType({"bearer_auth": True})})
+    if "security" in inspect.signature(make_request_options).parameters
+    else types.MappingProxyType({})
+)
 
 
-def _embedding_request_without_sdk_defaults(
+def _raw_chat_response(
+    result: ChatCompletion | Stream[ChatCompletionChunk] | AsyncStream[ChatCompletionChunk],
+) -> LegacyAPIResponse[ChatCompletion]:
+    assert isinstance(result, LegacyAPIResponse)
+    return result
+
+
+def _request_without_sdk_transform(
     data: Mapping[str, object], timeout: float | httpx.Timeout
 ) -> tuple[Mapping[str, object], RequestOptions]:
     body: Final = {k: v for k, v in data.items() if k not in _SDK_OPTION_KEYS}
@@ -362,6 +376,7 @@ def _embedding_request_without_sdk_defaults(
         extra_query=_EXTRA_QUERY_ADAPTER.validate_python(data.get("extra_query")),
         extra_body=data.get("extra_body"),
         timeout=timeout,
+        **_CLIENT_API_KEY_ONLY_AUTH,  # pyright: ignore[reportArgumentType]  # openai<3 make_request_options has no security kwarg
     )
     return body, options
 
@@ -515,7 +530,17 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
         """
         start_time: Final = time.time()
         try:
-            raw_response = await openai_aclient.chat.completions.with_raw_response.create(**data, timeout=timeout)
+            body, options = _request_without_sdk_transform(data, timeout)
+            raw_response = _raw_chat_response(
+                await openai_aclient.post(
+                    "/chat/completions",
+                    body=body,
+                    cast_to=ChatCompletion,
+                    options=options,
+                    stream=bool(data.get("stream")),
+                    stream_cls=AsyncStream[ChatCompletionChunk],
+                )
+            )
             end_time = time.time()
 
             if hasattr(raw_response, "headers"):
@@ -556,7 +581,17 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
         """
         raw_response = None
         try:
-            raw_response = openai_client.chat.completions.with_raw_response.create(**data, timeout=timeout)
+            body, options = _request_without_sdk_transform(data, timeout)
+            raw_response = _raw_chat_response(
+                openai_client.post(
+                    "/chat/completions",
+                    body=body,
+                    cast_to=ChatCompletion,
+                    options=options,
+                    stream=bool(data.get("stream")),
+                    stream_cls=Stream[ChatCompletionChunk],
+                )
+            )
 
             if hasattr(raw_response, "headers"):
                 headers = dict(raw_response.headers)
@@ -1255,7 +1290,7 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
         logging_obj: LiteLLMLoggingObj,
     ) -> LegacyAPIResponse[CreateEmbeddingResponse]:
         if "encoding_format" not in data:
-            body, options = _embedding_request_without_sdk_defaults(data, timeout)
+            body, options = _request_without_sdk_transform(data, timeout)
             bypass_response: Final = await openai_aclient.post(
                 "/embeddings", body=body, options=options, cast_to=CreateEmbeddingResponse
             )
@@ -1272,7 +1307,7 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
         logging_obj: LiteLLMLoggingObj,
     ) -> LegacyAPIResponse[CreateEmbeddingResponse]:
         if "encoding_format" not in data:
-            body, options = _embedding_request_without_sdk_defaults(data, timeout)
+            body, options = _request_without_sdk_transform(data, timeout)
             bypass_response: Final = openai_client.post(
                 "/embeddings", body=body, options=options, cast_to=CreateEmbeddingResponse
             )

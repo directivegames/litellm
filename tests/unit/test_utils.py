@@ -98,6 +98,7 @@ from litellm.utils import (
     _snapshot_exception_for_hook,
     async_post_call_failure_deployment_hook,
     async_post_call_success_deployment_hook,
+    async_pre_call_deployment_hook,
     calculate_max_parallel_requests,
     client,
     get_non_default_completion_params,
@@ -969,6 +970,16 @@ def test_aaamodel_prices_and_context_window_json_is_valid():
                 "cache_creation_input_token_cost_above_1hr_above_100k_tokens": {"type": "number"},
                 "cache_creation_input_token_cost_above_1hr_above_200k_tokens": {"type": "number"},
                 "cache_read_input_audio_token_cost": {"type": "number"},
+                "cache_read_input_audio_token_cost_batches": {"type": "number"},
+                "cache_read_input_audio_token_cost_flex": {"type": "number"},
+                "cache_read_input_audio_token_cost_priority": {"type": "number"},
+                "input_cost_per_audio_token_above_200k_tokens": {"type": "number"},
+                "input_cost_per_audio_token_above_200k_tokens_batches": {"type": "number"},
+                "input_cost_per_audio_token_above_200k_tokens_flex": {"type": "number"},
+                "input_cost_per_audio_token_above_200k_tokens_priority": {"type": "number"},
+                "input_cost_per_token_above_200k_tokens_flex": {"type": "number"},
+                "output_cost_per_image_token_priority": {"type": "number"},
+                "output_cost_per_token_above_200k_tokens_flex": {"type": "number"},
                 "cache_read_input_image_token_cost": {"type": "number"},
                 "audio_transcription_config": {"type": "string"},
                 "deprecation_date": {"type": "string"},
@@ -976,6 +987,7 @@ def test_aaamodel_prices_and_context_window_json_is_valid():
                 "input_cost_per_audio_per_second_above_128k_tokens": {"type": "number"},
                 "google_maps_grounding_cost_per_query": {"type": "number"},
                 "input_cost_per_audio_token": {"type": "number"},
+                "input_cost_per_audio_token_flex": {"type": "number"},
                 "input_cost_per_image_token": {"type": "number"},
                 "input_cost_per_character": {"type": "number"},
                 "input_cost_per_character_above_128k_tokens": {"type": "number"},
@@ -1276,6 +1288,7 @@ def test_aaamodel_prices_and_context_window_json_is_valid():
                 "supports_native_streaming": {"type": "boolean"},
                 "supports_image_size": {"type": "boolean"},
                 "supports_native_structured_output": {"type": "boolean"},
+                "supports_bedrock_native_structured_output": {"type": "boolean"},
                 "use_openai_responses_path": {"type": "boolean"},
                 "off_peak_pricing": {
                     "type": "object",
@@ -1574,6 +1587,38 @@ def test_get_provider_rerank_config():
         "my_model", LlmProviders.HOSTED_VLLM, "http://localhost", []
     )
     assert isinstance(config, HostedVLLMRerankConfig)
+
+
+def test_get_provider_video_config_resolves_a_custom_provider_map_base_video_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `BaseVideoConfig` registered in `custom_provider_map` answers for its provider name, a `CustomLLM`
+    registered there does not, and a built-in name still resolves to its built-in config even when a `CustomLLM`
+    shadows it in the map."""
+    from litellm.llms.custom_llm import CustomLLM
+    from litellm.llms.openai.videos.transformation import OpenAIVideoConfig
+
+    class QueueVideoConfig(OpenAIVideoConfig):
+        pass
+
+    video_config: Final = QueueVideoConfig()
+    monkeypatch.setattr(
+        litellm,
+        "custom_provider_map",
+        [
+            {"provider": "queue-video", "custom_handler": video_config},
+            {"provider": "image-only", "custom_handler": CustomLLM()},
+            {"provider": "openai", "custom_handler": CustomLLM()},
+        ],
+    )
+    monkeypatch.setattr(litellm, "_custom_providers", ["queue-video", "image-only", "openai"])
+
+    assert ProviderConfigManager.get_provider_video_config(model="seedance-1", provider="queue-video") is video_config
+    assert ProviderConfigManager.get_provider_video_config(model="seedance-1", provider="image-only") is None
+    assert isinstance(
+        ProviderConfigManager.get_provider_video_config(model="sora-2", provider="openai"), OpenAIVideoConfig
+    )
+    assert ProviderConfigManager.get_provider_video_config(model="seedance-1", provider="not-registered") is None
 
 
 def test_get_provider_text_to_speech_config_vertex_gemini_skips_cloud_tts():
@@ -4749,7 +4794,8 @@ def test_reapply_runtime_registrations_replays_register_model_overrides(
     # installed would make this depend on when that happens.
     monkeypatch.setattr(litellm_utils._LiveDeploymentReplay, "callback", None)
 
-    saved_model_cost = litellm.model_cost
+    saved_model_cost: Final = litellm.model_cost
+    monkeypatch.setattr(litellm, "model_cost", dict(saved_model_cost))
     try:
         litellm.register_model(
             model_cost={
@@ -7663,7 +7709,6 @@ def test_openai_non_text_embedding_3_drop_params_per_call():
         litellm.drop_params = prev_drop_params
 
 
-
 @pytest.mark.usefixtures(
     "_vcr_outcome_gate_local_testing",
     "isolate_litellm_state",
@@ -10009,3 +10054,25 @@ def test_get_optional_params_forwards_a_tool_config_cache_point_to_a_downstream_
     )
 
     assert optional_params["extra_body"] == {"kept": True, "cache_control_injection_points": [point]}
+
+
+class _RecordingPreCallDeploymentHook(CustomLogger):
+    def __init__(self) -> None:
+        super().__init__()
+        self.seen_call_types: tuple[CallTypes | None, ...] = ()
+
+    async def async_pre_call_deployment_hook(
+        self, kwargs: dict[str, object], call_type: CallTypes | None
+    ) -> dict[str, object] | None:
+        self.seen_call_types = (*self.seen_call_types, call_type)
+        return None
+
+
+@pytest.mark.asyncio
+async def test_pre_call_deployment_hook_hands_responses_compact_its_call_type(monkeypatch: pytest.MonkeyPatch) -> None:
+    hook: Final = _RecordingPreCallDeploymentHook()
+    monkeypatch.setattr(litellm, "callbacks", [hook])
+
+    await async_pre_call_deployment_hook({"model": "gpt-5.4-mini"}, "acompact_responses")
+
+    assert hook.seen_call_types == (CallTypes.acompact_responses,)

@@ -13,7 +13,9 @@ from pydantic import BaseModel
 
 import litellm
 from litellm import ModelResponse, completion, embedding, image_generation
+from litellm.cost_calculator import batch_cost_calculator
 from litellm.litellm_core_utils.exception_mapping_utils import exception_type
+from litellm.litellm_core_utils.llm_cost_calc.utils import generic_cost_per_token, parse_prompt_tokens_details
 from litellm.llms.anthropic.pass_through.messages import handler as anthropic_messages_handler
 from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler, HTTPHandler
 from litellm.llms.gemini.chat.transformation import GoogleAIStudioGeminiConfig
@@ -22,8 +24,9 @@ from litellm.llms.vertex_ai.vertex_llm_base import VertexBase
 from litellm.llms.vertex_ai.gemini.vertex_and_google_ai_studio_gemini import (
     VertexGeminiConfig,
 )
+from litellm.types.llms.base import CachedTokensDetails
 from litellm.types.llms.vertex_ai import GeminiFinishReason, UsageMetadata
-from litellm.types.utils import ChoiceLogprobs, Usage
+from litellm.types.utils import ChoiceLogprobs, ModelInfo, Usage
 from litellm.utils import _invalidate_model_cost_lowercase_map, CustomStreamWrapper
 from litellm.litellm_core_utils.logging_worker import GLOBAL_LOGGING_WORKER
 from litellm.integrations.custom_logger import CustomLogger
@@ -1271,6 +1274,7 @@ def test_vertex_ai_usage_metadata_accumulates_duplicate_modalities():
     v = VertexGeminiConfig()
     usage_metadata = {
         "promptTokenCount": 210,
+        "cachedContentTokenCount": 54,
         "candidatesTokenCount": 50,
         "totalTokenCount": 260,
         "promptTokensDetails": [
@@ -1292,14 +1296,127 @@ def test_vertex_ai_usage_metadata_accumulates_duplicate_modalities():
     usage_metadata = UsageMetadata(**usage_metadata)
     result = v.calculate_usage(completion_response={"usageMetadata": usage_metadata})
 
-    # prompt details are total - cached per modality
-    assert result.prompt_tokens_details.text_tokens == 16  # 20 - 4
-    assert result.prompt_tokens_details.image_tokens == 140  # (90 + 100) - (40 + 10)
+    assert result.prompt_tokens_details.text_tokens == 20
+    assert result.prompt_tokens_details.image_tokens == 190
+    assert result.prompt_tokens_details.cached_tokens == 54
+    assert result.prompt_tokens_details.cached_tokens_details == CachedTokensDetails(text_tokens=4, image_tokens=50)
 
     # candidates details accumulate duplicate modalities
     assert result.completion_tokens_details.text_tokens == 20  # 15 + 5
     assert result.completion_tokens_details.image_tokens == 30
     assert result.completion_tokens == 50
+
+
+def _gemini_usage_with_cached_audio(cached_audio_tokens: int) -> Usage:
+    cache_tokens_details: Final = (
+        (
+            {"modality": "TEXT", "tokenCount": 5},
+            {"modality": "AUDIO", "tokenCount": cached_audio_tokens},
+        )
+        if cached_audio_tokens > 0
+        else ({"modality": "TEXT", "tokenCount": 5},)
+    )
+    completion_response: Final = {
+        "usageMetadata": {
+            "promptTokenCount": 40,
+            "cachedContentTokenCount": 5 + cached_audio_tokens,
+            "promptTokensDetails": (
+                {"modality": "TEXT", "tokenCount": 20},
+                {"modality": "AUDIO", "tokenCount": 20},
+            ),
+            "cacheTokensDetails": cache_tokens_details,
+            "candidatesTokenCount": 7,
+            "totalTokenCount": 47,
+        }
+    }
+    return VertexGeminiConfig.calculate_usage(completion_response=completion_response)
+
+
+def test_gemini_raw_usage_metadata_prices_cached_audio_at_its_batch_rate() -> None:
+    model_info: Final[ModelInfo] = {
+        "input_cost_per_token": 2e-6,
+        "input_cost_per_token_batches": 1e-6,
+        "input_cost_per_audio_token": 6e-6,
+        "input_cost_per_audio_token_batches": 3e-6,
+        "cache_read_input_token_cost": 8e-7,
+        "cache_read_input_token_cost_batches": 4e-7,
+        "cache_read_input_audio_token_cost": 5e-7,
+        "cache_read_input_audio_token_cost_batches": 2e-7,
+    }
+    usage: Final = _gemini_usage_with_cached_audio(5)
+    expected_prompt_cost: Final = (
+        15 * model_info["input_cost_per_token_batches"]
+        + 15 * model_info["input_cost_per_audio_token_batches"]
+        + 5 * model_info["cache_read_input_token_cost_batches"]
+        + 5 * model_info["cache_read_input_audio_token_cost_batches"]
+    )
+
+    prompt_cost, _ = batch_cost_calculator(
+        usage=usage,
+        model="gemini-audio-batch-test-model",
+        custom_llm_provider="gemini",
+        model_info=model_info,
+    )
+
+    assert prompt_cost == pytest.approx(expected_prompt_cost)
+
+
+def test_gemini_raw_usage_metadata_prices_cached_audio_at_its_standard_rate() -> None:
+    model_info: Final[ModelInfo] = {
+        "input_cost_per_token": 2e-6,
+        "input_cost_per_audio_token": 6e-6,
+        "cache_read_input_token_cost": 8e-7,
+        "cache_read_input_audio_token_cost": 5e-7,
+    }
+    usage: Final = _gemini_usage_with_cached_audio(5)
+    expected_prompt_cost: Final = (
+        15 * model_info["input_cost_per_token"]
+        + 15 * model_info["input_cost_per_audio_token"]
+        + 5 * model_info["cache_read_input_token_cost"]
+        + 5 * model_info["cache_read_input_audio_token_cost"]
+    )
+
+    prompt_cost, _ = generic_cost_per_token(
+        model="gemini-audio-standard-test-model",
+        usage=usage,
+        custom_llm_provider="gemini",
+        model_info=model_info,
+    )
+
+    assert prompt_cost == pytest.approx(expected_prompt_cost)
+
+
+def test_gemini_usage_totals_are_subtracted_once_and_audio_cache_rate_matches_audio_rate() -> None:
+    model_info: Final[ModelInfo] = {
+        "input_cost_per_token": 2e-6,
+        "input_cost_per_audio_token": 6e-6,
+        "cache_read_input_token_cost": 8e-7,
+        "cache_read_input_audio_token_cost": 6e-6,
+    }
+    cached_usage: Final = _gemini_usage_with_cached_audio(5)
+    uncached_usage: Final = _gemini_usage_with_cached_audio(0)
+    cached_details: Final = parse_prompt_tokens_details(cached_usage)
+    cached_prompt_cost, _ = generic_cost_per_token(
+        model="gemini-audio-standard-test-model",
+        usage=cached_usage,
+        custom_llm_provider="gemini",
+        model_info=model_info,
+    )
+    uncached_prompt_cost, _ = generic_cost_per_token(
+        model="gemini-audio-standard-test-model",
+        usage=uncached_usage,
+        custom_llm_provider="gemini",
+        model_info=model_info,
+    )
+
+    assert cached_usage.prompt_tokens_details.text_tokens == 20
+    assert cached_usage.prompt_tokens_details.audio_tokens == 20
+    assert cached_usage.prompt_tokens_details.cached_tokens_details == CachedTokensDetails(
+        text_tokens=5, audio_tokens=5
+    )
+    assert cached_details["text_tokens"] == 15
+    assert cached_details["audio_tokens"] == 15
+    assert cached_prompt_cost == pytest.approx(uncached_prompt_cost)
 
 
 def test_vertex_ai_map_thinking_param_with_budget_tokens_0():
@@ -5532,7 +5649,7 @@ def test_vertex_ai_usage_metadata_with_document_tokens_in_prompt():
 
 
 def test_vertex_ai_usage_metadata_with_document_tokens_cached():
-    """Test that cached DOCUMENT tokens are correctly subtracted from prompt text tokens."""
+    """Test cached DOCUMENT token details and unchanged prompt cost."""
     v = VertexGeminiConfig()
 
     usage_metadata_dict = {
@@ -5556,10 +5673,24 @@ def test_vertex_ai_usage_metadata_with_document_tokens_cached():
     completion_response = {"usageMetadata": usage_metadata_dict}
     result = v.calculate_usage(completion_response=completion_response)
 
-    # DOCUMENT cached tokens map to cached_text_tokens, so:
-    # text_tokens = (8 TEXT + 774 DOCUMENT) - 400 cached = 382
-    assert result.prompt_tokens_details.text_tokens == 382, "text_tokens should be (8 + 774) - 400 cached = 382"
+    assert result.prompt_tokens_details.text_tokens == 782
     assert result.prompt_tokens_details.cached_tokens == 400
+    assert result.prompt_tokens_details.cached_tokens_details.text_tokens == 400
+
+    model_info: Final[ModelInfo] = {
+        "input_cost_per_token": 2e-6,
+        "cache_read_input_token_cost": 5e-7,
+    }
+    prompt_cost, _ = generic_cost_per_token(
+        model="gemini-document-cache-test-model",
+        usage=result,
+        custom_llm_provider="gemini",
+        model_info=model_info,
+    )
+
+    assert prompt_cost == pytest.approx(
+        382 * model_info["input_cost_per_token"] + 400 * model_info["cache_read_input_token_cost"]
+    )
 
 
 def test_async_streaming_uses_custom_client():
@@ -9756,3 +9887,87 @@ async def test_gemini_sends_a_boolean_for_a_gateway_default_written_as_text_or_n
     sent: Final = await _sent_thinking_config("gemini-3.8-flash", {"reasoning_effort": "high"})
 
     assert sent["includeThoughts"] is expected
+
+
+_HOSTED_MCP_TOOL: Final = {
+    "type": "mcp",
+    "server_label": "deepwiki",
+    "server_url": "https://mcp.deepwiki.com/mcp",
+    "require_approval": "never",
+}
+_WEATHER_FUNCTION_TOOL: Final = {
+    "type": "function",
+    "function": {"name": "get_weather", "parameters": {"type": "object", "properties": {}}},
+}
+_GEMINI_ROUTES: Final = (
+    pytest.param(VertexGeminiConfig, "vertex_ai", id="vertex_ai"),
+    pytest.param(GoogleAIStudioGeminiConfig, "gemini", id="gemini"),
+)
+
+
+@pytest.mark.parametrize(("config_class", "route"), _GEMINI_ROUTES)
+def test_a_hosted_mcp_tool_answers_400_on_gemini_without_drop_params(monkeypatch, config_class, route):
+    monkeypatch.setattr(litellm, "drop_params", False)
+    with pytest.raises(litellm.utils.UnsupportedParamsError) as raised:
+        config_class().map_openai_params(
+            non_default_params={"tools": [_WEATHER_FUNCTION_TOOL, _HOSTED_MCP_TOOL]},
+            optional_params={},
+            model="gemini-3.8-flash",
+            drop_params=False,
+        )
+    assert raised.value.status_code == 400
+    assert f"gemini-3.8-flash on {route} " in str(raised.value)
+    assert "`deepwiki`" in str(raised.value)
+    assert "litellm_proxy/mcp/" in str(raised.value)
+
+
+@pytest.mark.parametrize(("config_class", "route"), _GEMINI_ROUTES)
+def test_gemini_drops_a_hosted_mcp_tool_under_drop_params_and_keeps_the_function_tool(
+    monkeypatch, caplog, config_class, route
+):
+    monkeypatch.setattr(litellm, "drop_params", False)
+    with caplog.at_level("WARNING"):
+        mapped: Final = config_class().map_openai_params(
+            non_default_params={"tools": [_HOSTED_MCP_TOOL, _WEATHER_FUNCTION_TOOL]},
+            optional_params={},
+            model="gemini-3.8-flash",
+            drop_params=True,
+        )
+    assert "deepwiki" not in json.dumps(mapped)
+    assert "get_weather" in json.dumps(mapped["tools"])
+    assert any(
+        "`deepwiki`" in record.getMessage() and f" on {route} (" in record.getMessage() for record in caplog.records
+    )
+
+
+@pytest.mark.parametrize(("config_class", "route"), _GEMINI_ROUTES)
+def test_gemini_sends_no_tools_when_drop_params_drops_every_hosted_mcp_tool(monkeypatch, config_class, route):
+    monkeypatch.setattr(litellm, "drop_params", False)
+    mapped: Final = config_class().map_openai_params(
+        non_default_params={"tools": [_HOSTED_MCP_TOOL], "tool_choice": "required"},
+        optional_params={},
+        model="gemini-3.8-flash",
+        drop_params=True,
+    )
+    assert "tools" not in mapped
+    assert "tool_choice" not in mapped
+
+
+@pytest.mark.parametrize(("config_class", "route"), _GEMINI_ROUTES)
+def test_gemini_keeps_tool_choice_none_for_legacy_functions_after_dropping_every_hosted_mcp_tool(
+    monkeypatch, config_class, route
+):
+    monkeypatch.setattr(litellm, "drop_params", False)
+    mapped: Final = config_class().map_openai_params(
+        non_default_params={
+            "tools": [_HOSTED_MCP_TOOL],
+            "functions": [_WEATHER_FUNCTION_TOOL["function"]],
+            "tool_choice": "none",
+        },
+        optional_params={},
+        model="gemini-3.8-flash",
+        drop_params=True,
+    )
+    assert "deepwiki" not in json.dumps(mapped)
+    assert "get_weather" in json.dumps(mapped["tools"])
+    assert mapped["tool_choice"] == {"functionCallingConfig": {"mode": "NONE"}}

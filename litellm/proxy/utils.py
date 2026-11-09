@@ -64,6 +64,7 @@ from litellm.constants import (
     PROXY_REJECTED_BEFORE_ROUTING_KEY,
     REDIS_SPEND_LOGS_BUFFER_DEQUEUE_COUNT,
     SPEND_LOG_QUEUE_MAX_BYTES,
+    SPEND_LOG_READ_STATEMENT_TIMEOUT_SECONDS,
     SPEND_LOG_WRITE_BATCH_MAX_BYTES,
     SPEND_LOG_WRITE_BATCH_MAX_ROWS,
 )
@@ -180,6 +181,7 @@ from litellm.proxy.auth.route_checks import RouteChecks
 from litellm.proxy.common_utils.callback_utils import add_guardrail_to_applied_guardrails_header
 from litellm.proxy.common_utils.config_sync_pubsub import publish_config_param_change
 from litellm.proxy.common_utils.user_api_key_cache import UserApiKeyCache
+from litellm.proxy.db import tool_registry_writer
 from litellm.proxy.db.create_views import (
     create_missing_views,
     create_view_tolerating_race,
@@ -187,6 +189,7 @@ from litellm.proxy.db.create_views import (
 )
 from litellm.proxy.db.db_span import db_span
 from litellm.proxy.db.db_spend_update_writer import DBSpendUpdateWriter
+from litellm.proxy.db.db_transaction_queue.redis_update_buffer import RedisUpdateBuffer
 from litellm.proxy.db.db_url_settings import (
     DatabaseURLSettings,
     add_missing_query_params,
@@ -195,6 +198,7 @@ from litellm.proxy.db.db_url_settings import (
 from litellm.proxy.db.exception_handler import (
     PrismaDBExceptionHandler,
     call_with_db_reconnect_retry,
+    db_write_never_sent,
 )
 from litellm.proxy.db.health_check_latest import (
     LatestHealthCheckRow,
@@ -324,6 +328,7 @@ _VIEW_SETUP_POLL_INTERVAL_SECONDS: Final = 5.0
 _VIEW_SETUP_DEADLINE_SECONDS: Final = 15 * 60.0
 _VIEW_SETUP_GATE_TABLE: Final = '"LiteLLM_SpendLogs"'
 _VIEW_SETUP_GATE_PROBE_ROWS: Final = TypeAdapter(tuple[Mapping[str, bool], ...])
+_REQUEST_FIELDS: Final = TypeAdapter(Mapping[str, object])
 
 _ViewSetupOutcome: TypeAlias = Literal["ready", "timed_out"]
 _ViewSetupAttempt: TypeAlias = Literal["ready", "table_missing"] | Exception
@@ -4139,6 +4144,7 @@ class ProxyLogging:
             response = pipeline_response  # rebind-ok: adopt the pipeline's replacement response, same contract as the callback loops below
 
         pipeline_managed: Final = pipeline_managed_guardrail_names(data, "post_call")
+        request_view: Final = _REQUEST_FIELDS.validate_python(data)
         guardrail_callbacks, other_callbacks = _partition_post_call_callbacks()
         try:
             # Merge model-level guardrails before checking which guardrails to run
@@ -4167,6 +4173,9 @@ class ProxyLogging:
                     )
                     is not True
                 ):
+                    continue
+
+                if callback.post_call_already_checked(request_view, response) is True:
                     continue
 
                 guardrail_response: Any | None = None
@@ -4242,9 +4251,12 @@ class ProxyLogging:
         immediately before awaiting, and the unified hook pops it before its first
         suspension point, so concurrent guardrails never race on that key.
         """
+        request_view: Final = _REQUEST_FIELDS.validate_python(data)
 
         async def _run_one(callback: CustomGuardrail) -> None:
             if callback.should_run_guardrail(data=guardrail_data, event_type=GuardrailEventHooks.post_call) is not True:
+                return
+            if callback.post_call_already_checked(request_view, response) is True:
                 return
             if "apply_guardrail" in type(callback).__dict__ and not callback.use_native_lifecycle_hooks:
                 data["guardrail_to_apply"] = callback
@@ -5035,6 +5047,39 @@ def jsonify_object(data: dict) -> dict:
 _deprecated_key_cache: Final[LimitedSizeOrderedDict] = LimitedSizeOrderedDict(max_size=1000)
 _DEPRECATED_KEY_CACHE_TTL_SECONDS: Final = 60
 _PRISMA_DEFAULT_TX_TIMEOUT: Final = timedelta(seconds=5)
+_SPEND_LOG_READ_STATEMENT_TIMEOUT: Final = timedelta(seconds=SPEND_LOG_READ_STATEMENT_TIMEOUT_SECONDS)
+_STATEMENT_TIMEOUT_TRANSACTION_GRACE: Final = timedelta(seconds=5)
+
+
+class _ReadTransactionClient(Protocol):
+    @property
+    def read_db(self) -> PrismaWrapper: ...
+
+
+async def query_raw_within_statement_timeout(
+    prisma_client: _ReadTransactionClient,
+    sql: str,
+    *params: object,
+    what: str = "Spend logs",
+    timeout: timedelta = _SPEND_LOG_READ_STATEMENT_TIMEOUT,
+) -> Sequence[Mapping[str, object]]:
+    """One raw read on the read target that Postgres cancels at ``timeout``.
+
+    Prisma's HTTP client gives up on a statement after 30s anyway, so without
+    this the Admin UI's error is the same but Postgres keeps running the scan.
+    A cancelled read surfaces as a 503 asking for a narrower date range.
+    """
+    try:
+        async with prisma_client.read_db.tx(timeout=timeout + _STATEMENT_TIMEOUT_TRANSACTION_GRACE) as transaction:
+            await transaction.execute_raw(f"SET LOCAL statement_timeout = {int(timeout / timedelta(milliseconds=1))}")
+            return await transaction.query_raw(sql, *params)
+    except Exception as e:
+        if not PrismaDBExceptionHandler.is_statement_timeout_error(e):
+            raise
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"error": f"{what} took longer than {int(timeout.total_seconds())}s. Pick a shorter date range"},
+        ) from e
 
 
 async def _lookup_deprecated_key(
@@ -8289,6 +8334,18 @@ class ProxyUpdateSpend:
         return False
 
 
+async def commit_tool_discoveries(prisma_client: PrismaClient, proxy_logging_obj: ProxyLogging) -> None:
+    """Scheduler job writing discovered tools to LiteLLM_ToolTable, on its own lock, next to update_spend."""
+    writer: Final = proxy_logging_obj.db_spend_update_writer
+    await tool_registry_writer.commit_tool_discoveries(
+        prisma_client=prisma_client,
+        tool_discovery_queue=writer.tool_discovery_queue,
+        redis_update_buffer=writer.redis_update_buffer,
+        pod_lock_manager=writer.pod_lock_manager,
+        use_redis_buffer=RedisUpdateBuffer.should_commit_spend_updates_to_redis(),
+    )
+
+
 async def update_spend(
     prisma_client: PrismaClient,
     db_writer_client: AsyncHTTPHandler | None,
@@ -8452,9 +8509,20 @@ async def update_daily_tag_spend(
 
 def _rollup_batch_never_applied(e: Exception) -> bool:
     """True when a drained rollup batch provably never reached its rows: Postgres had no
-    connection for it (53300) or cancelled it under ``lock_timeout`` before it took the row
-    lock (55P03). Either way re-sending the batch cannot double-count, so it is requeued."""
-    return PrismaDBExceptionHandler.is_database_capacity_error(e) or PrismaDBExceptionHandler.is_lock_timeout_error(e)
+    connection for it (53300), was unreachable or refusing connections (P1001, 57P03), or
+    cancelled it under ``lock_timeout`` before it took the row lock (55P03). In each case
+    re-sending the batch cannot double-count, so it is requeued."""
+    return (
+        PrismaDBExceptionHandler.is_database_capacity_error(e)
+        or db_write_never_sent(e)
+        or PrismaDBExceptionHandler.is_lock_timeout_error(e)
+    )
+
+
+def _rollup_failure_stops_job(e: Exception) -> bool:
+    """True when the database cannot take any write, so the job stops instead of draining
+    the queues after this one into the same failure."""
+    return PrismaDBExceptionHandler.is_database_capacity_error(e) or db_write_never_sent(e)
 
 
 async def update_spend_logs_job(
@@ -8545,12 +8613,12 @@ async def _run_spend_logs_job(
                     *prisma_client.tool_usage_transactions,
                 ]
             verbose_proxy_logger.warning(
-                "Spend tracking - database out of connections or rollup row lock timed out during tool usage "
+                "Spend tracking - database unavailable or rollup row lock timed out during tool usage "
                 "flush, requeued %s tool usage transactions for the next flush: %s",
                 len(tool_usage_to_process),
                 tool_tracking_err,
             )
-            if PrismaDBExceptionHandler.is_database_capacity_error(tool_tracking_err):
+            if _rollup_failure_stops_job(tool_tracking_err):
                 raise
         else:
             verbose_proxy_logger.error(
@@ -8577,12 +8645,12 @@ async def _run_spend_logs_job(
                     *prisma_client.model_usage_transactions,
                 ]
             verbose_proxy_logger.warning(
-                "Spend tracking - database out of connections or rollup row lock timed out during model usage "
+                "Spend tracking - database unavailable or rollup row lock timed out during model usage "
                 "flush, requeued %s model usage transactions for the next flush: %s",
                 len(model_usage_to_process),
                 model_usage_err,
             )
-            if PrismaDBExceptionHandler.is_database_capacity_error(model_usage_err):
+            if _rollup_failure_stops_job(model_usage_err):
                 raise
         else:
             verbose_proxy_logger.error(
@@ -8759,6 +8827,7 @@ def _is_transient_spend_log_write_error(e: Exception) -> bool:
     return (
         PrismaDBExceptionHandler.is_database_transport_error(e)
         or PrismaDBExceptionHandler.is_prisma_engine_internal_error(e)
+        or PrismaDBExceptionHandler.is_database_lifecycle_error(e)
         or PrismaDBExceptionHandler.is_deadlock_error(e)
     )
 

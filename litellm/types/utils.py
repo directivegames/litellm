@@ -205,6 +205,7 @@ class ProviderSpecificModelInfo(TypedDict, total=False):
     supports_pdf_input: bool | None
     supports_native_streaming: bool | None
     supports_native_structured_output: bool | None
+    supports_bedrock_native_structured_output: ReadOnly[bool | None]
     supports_parallel_function_calling: bool | None
     supports_web_search: bool | None
     supports_reasoning: bool | None
@@ -212,6 +213,7 @@ class ProviderSpecificModelInfo(TypedDict, total=False):
     supports_legacy_thinking: ReadOnly[bool | None]
     thinking_always_on: ReadOnly[bool | None]
     supports_tool_search: bool | None
+    supports_per_turn_control: ReadOnly[bool | None]
     supports_mid_conversation_system: bool | None
     supports_url_context: bool | None
     supports_none_reasoning_effort: bool | None
@@ -321,6 +323,8 @@ class ModelInfoBase(ProviderSpecificModelInfo, total=False):
     cache_creation_input_token_cost_ultrafast: ReadOnly[float | None]  # OpenAI ultrafast service tier pricing
     cache_read_input_token_cost: float | None
     cache_read_input_audio_token_cost: ReadOnly[float | None]
+    cache_read_input_audio_token_cost_flex: ReadOnly[float | None]
+    cache_read_input_audio_token_cost_priority: ReadOnly[float | None]
     cache_read_input_image_token_cost: ReadOnly[float | None]
     cache_read_input_token_cost_flex: float | None  # OpenAI flex service tier pricing
     cache_read_input_token_cost_priority: float | None  # OpenAI priority service tier pricing
@@ -335,6 +339,7 @@ class ModelInfoBase(ProviderSpecificModelInfo, total=False):
     cache_read_input_token_cost_above_272k_tokens_ultrafast: ReadOnly[float | None]
     cache_read_input_token_cost_above_512k_tokens: float | None
     cache_read_input_token_cost_batches: ReadOnly[float | None]
+    cache_read_input_audio_token_cost_batches: ReadOnly[float | None]
     cache_read_input_token_cost_above_200k_tokens_batches: ReadOnly[float | None]
     cache_read_input_token_cost_above_100k_tokens_batches: ReadOnly[float | None]
     cache_read_input_token_cost_above_272k_tokens_batches: ReadOnly[float | None]
@@ -348,6 +353,12 @@ class ModelInfoBase(ProviderSpecificModelInfo, total=False):
     off_peak_pricing: ReadOnly[OffPeakPricing | None]  # time-windowed off-peak rates
     input_cost_per_character: float | None  # only for vertex ai models
     input_cost_per_audio_token: float | None
+    input_cost_per_audio_token_flex: ReadOnly[float | None]
+    input_cost_per_audio_token_above_200k_tokens: ReadOnly[float | None]
+    input_cost_per_audio_token_above_200k_tokens_flex: ReadOnly[float | None]
+    input_cost_per_audio_token_above_200k_tokens_priority: ReadOnly[float | None]
+    input_cost_per_audio_token_above_200k_tokens_batches: ReadOnly[float | None]
+    input_cost_per_audio_token_priority: ReadOnly[float | None]
     input_cost_per_token_above_128k_tokens: float | None  # only for vertex ai models
     input_cost_per_token_above_200k_tokens: float | None  # only for vertex ai gemini-2.5-pro models
     input_cost_per_token_above_100k_tokens: ReadOnly[float | None]
@@ -372,10 +383,12 @@ class ModelInfoBase(ProviderSpecificModelInfo, total=False):
     input_cost_per_token_batches: float | None
     input_cost_per_video_token_batches: ReadOnly[float | None]
     input_cost_per_token_above_200k_tokens_batches: ReadOnly[float | None]
+    input_cost_per_token_above_200k_tokens_flex: ReadOnly[float | None]
     input_cost_per_token_above_100k_tokens_batches: ReadOnly[float | None]
     input_cost_per_token_above_272k_tokens_batches: ReadOnly[float | None]
     output_cost_per_token_batches: float | None
     output_cost_per_token_above_200k_tokens_batches: ReadOnly[float | None]
+    output_cost_per_token_above_200k_tokens_flex: ReadOnly[float | None]
     output_cost_per_token_above_100k_tokens_batches: ReadOnly[float | None]
     output_cost_per_token_above_272k_tokens_batches: ReadOnly[float | None]
     output_cost_per_token: Required[float | None]
@@ -408,6 +421,7 @@ class ModelInfoBase(ProviderSpecificModelInfo, total=False):
     output_cost_per_pixel: ReadOnly[float | None]
     output_cost_per_image_token: float | None
     output_cost_per_image_token_batches: ReadOnly[float | None]
+    output_cost_per_image_token_priority: ReadOnly[float | None]
     output_cost_per_video_token: float | None  # for gemini omni models with video output
     output_vector_size: int | None
     output_cost_per_reasoning_token: float | None
@@ -641,6 +655,14 @@ class CallTypes(str, Enum):
     retrieve_fine_tuning_job = "retrieve_fine_tuning_job"
     responses = "responses"
     aresponses = "aresponses"
+    get_responses = "get_responses"
+    aget_responses = "aget_responses"
+    delete_responses = "delete_responses"
+    adelete_responses = "adelete_responses"
+    cancel_responses = "cancel_responses"
+    acancel_responses = "acancel_responses"
+    compact_responses = "compact_responses"
+    acompact_responses = "acompact_responses"
     alist_input_items = "alist_input_items"
     llm_passthrough_route = "llm_passthrough_route"
     allm_passthrough_route = "allm_passthrough_route"
@@ -742,6 +764,8 @@ CallTypesLiteral = Literal[
     "send_message",
     "aresponses",
     "responses",
+    "compact_responses",
+    "acompact_responses",
     "acreate_skill",
     "acreate_realtime_client_secret",
     "arealtime_calls",
@@ -2836,6 +2860,8 @@ class TranscriptionUsageTokensObject(LiteLLMBaseModel):
 
 
 class TranscriptionResponse(OpenAIObject):
+    model_config = ConfigDict(hide_input_in_errors=True)
+
     text: str | None = None
     usage: TranscriptionUsageDurationObject | TranscriptionUsageTokensObject | None = None
 
@@ -3973,14 +3999,23 @@ class CustomPricingLiteLLMParams(MirroredPricingParams):
     cache_read_input_token_cost_above_100k_tokens_batches: float | None = None
     cache_read_input_token_cost_above_200k_tokens_batches: float | None = None
     cache_read_input_token_cost_above_272k_tokens_batches: float | None = None
+    cache_read_input_audio_token_cost_batches: float | None = None
     cache_creation_input_token_cost_batches: float | None = None
     cache_creation_input_token_cost_above_100k_tokens_batches: float | None = None
     cache_creation_input_token_cost_above_200k_tokens_batches: float | None = None
     cache_creation_input_token_cost_above_272k_tokens_batches: float | None = None
     cache_read_input_audio_token_cost: float | None = None
+    cache_read_input_audio_token_cost_flex: float | None = None
+    cache_read_input_audio_token_cost_priority: float | None = None
     cache_read_input_image_token_cost: float | None = None
     input_cost_per_character_above_128k_tokens: float | None = None
     input_cost_per_audio_token: float | None = None
+    input_cost_per_audio_token_flex: float | None = None
+    input_cost_per_audio_token_above_200k_tokens: float | None = None
+    input_cost_per_audio_token_above_200k_tokens_flex: float | None = None
+    input_cost_per_audio_token_above_200k_tokens_priority: float | None = None
+    input_cost_per_audio_token_above_200k_tokens_batches: float | None = None
+    input_cost_per_audio_token_priority: float | None = None
     input_cost_per_token_cache_hit: float | None = None
     input_cost_per_token_above_128k_tokens: float | None = None
     input_cost_per_token_above_100k_tokens: float | None = None
@@ -3990,6 +4025,7 @@ class CustomPricingLiteLLMParams(MirroredPricingParams):
     input_cost_per_token_above_272k_tokens_flex: float | None = None
     input_cost_per_token_above_272k_tokens_ultrafast: float | None = None
     input_cost_per_token_above_200k_tokens_batches: float | None = None
+    input_cost_per_token_above_200k_tokens_flex: float | None = None
     input_cost_per_token_above_100k_tokens_batches: float | None = None
     input_cost_per_token_above_272k_tokens_batches: float | None = None
     input_cost_per_query: float | None = None
@@ -4019,12 +4055,14 @@ class CustomPricingLiteLLMParams(MirroredPricingParams):
     output_cost_per_token_above_272k_tokens_flex: float | None = None
     output_cost_per_token_above_272k_tokens_ultrafast: float | None = None
     output_cost_per_token_above_200k_tokens_batches: float | None = None
+    output_cost_per_token_above_200k_tokens_flex: float | None = None
     output_cost_per_token_above_100k_tokens_batches: float | None = None
     output_cost_per_token_above_272k_tokens_batches: float | None = None
     output_cost_per_character_above_128k_tokens: float | None = None
     output_cost_per_image: float | None = None
     output_cost_per_image_token: float | None = None
     output_cost_per_image_token_batches: float | None = None
+    output_cost_per_image_token_priority: float | None = None
     output_cost_per_video_token: float | None = None
     output_cost_per_reasoning_token: float | None = None
     output_cost_per_reasoning_token_flex: float | None = None
@@ -4066,7 +4104,13 @@ class CustomPricingLiteLLMParams(MirroredPricingParams):
 
 DEPLOYMENT_SCOPED_PRICING_FIELDS: Final[frozenset[str]] = frozenset({"off_peak_pricing"})
 
-DEPLOYMENT_SCOPED_CAPABILITY_FIELDS: Final[frozenset[str]] = frozenset({"supports_regex_lookaround"})
+DEPLOYMENT_SCOPED_CAPABILITY_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "supports_regex_lookaround",
+        "supports_bedrock_native_structured_output",
+        "supports_per_turn_control",
+    }
+)
 
 DEPLOYMENT_SCOPED_TOKEN_COUNT_FIELDS: Final[frozenset[str]] = frozenset({"token_count_framing", "token_count_model"})
 

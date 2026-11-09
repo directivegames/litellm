@@ -6,6 +6,9 @@ on:
       - main
       - "litellm_**"
       - "directive/**"
+      - "rc/**"
+      - "stable/**"
+      - "lts/**"
   schedule:
     - cron: "23 6 * * *"
   workflow_dispatch:

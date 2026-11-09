@@ -1,16 +1,19 @@
 import asyncio
+import contextlib
+import inspect
 import importlib
 import json
 import os
 from collections.abc import Mapping
 from types import ModuleType
 from typing import Final, Literal, Protocol
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import httpx
 import pytest
 import respx
 from openai import AsyncOpenAI, OpenAI
+from openai._legacy_response import LegacyAPIResponse
 from openai._types import Response as SDKResponse
 from pydantic import BaseModel, ConfigDict, JsonValue
 
@@ -1596,7 +1599,7 @@ async def test_openai_prediction_param_mock():
     client = AsyncOpenAI(api_key="fake-api-key")
 
     with patch.object(
-        client.chat.completions.with_raw_response, "create"
+        client, "post"
     ) as mock_client:
         try:
             await litellm.acompletion(
@@ -1615,7 +1618,7 @@ async def test_openai_prediction_param_mock():
             print(f"Error: {e}")
 
         mock_client.assert_called_once()
-        request_body = mock_client.call_args.kwargs
+        request_body = mock_client.call_args.kwargs["body"]
 
         # Verify the request contains the prediction parameter
         assert "prediction" in request_body
@@ -1627,10 +1630,12 @@ async def test_openai_prediction_param_mock():
 def test_openai_max_retries_0(mock_get_openai_client):
     import litellm
 
-    mock_get_openai_client.return_value.chat.completions.with_raw_response.create.return_value.headers = {}
-    mock_get_openai_client.return_value.chat.completions.with_raw_response.create.return_value.parse.return_value = (
-        ModelResponse(choices=[{"message": {"role": "assistant", "content": "Hello"}}])
-    )
+    raw_response: Final = MagicMock(spec=LegacyAPIResponse)
+    raw_response.headers = {}
+    raw_response.parse.return_value = ModelResponse(choices=[{"message": {"role": "assistant", "content": "Hello"}}])
+    client_stub: Final = MagicMock()
+    client_stub.post.return_value = raw_response
+    mock_get_openai_client.return_value = client_stub
     litellm.set_verbose = True
     response = litellm.completion(
         model="gpt-4o-mini",
@@ -1739,7 +1744,7 @@ async def test_openai_safety_identifier_parameter():
     client = AsyncOpenAI(api_key="fake-api-key")
 
     with patch.object(
-        client.chat.completions.with_raw_response, "create"
+        client, "post"
     ) as mock_client:
         try:
             await litellm.acompletion(
@@ -1752,7 +1757,7 @@ async def test_openai_safety_identifier_parameter():
             print(f"Error: {e}")
 
         mock_client.assert_called_once()
-        request_body = mock_client.call_args.kwargs
+        request_body = mock_client.call_args.kwargs["body"]
 
         # Verify the request contains the safety_identifier parameter
         assert "safety_identifier" in request_body
@@ -1768,7 +1773,7 @@ def test_openai_safety_identifier_parameter_sync():
     client = OpenAI(api_key="fake-api-key")
 
     with patch.object(
-        client.chat.completions.with_raw_response, "create"
+        client, "post"
     ) as mock_client:
         try:
             litellm.completion(
@@ -1781,7 +1786,7 @@ def test_openai_safety_identifier_parameter_sync():
             print(f"Error: {e}")
 
         mock_client.assert_called_once()
-        request_body = mock_client.call_args.kwargs
+        request_body = mock_client.call_args.kwargs["body"]
 
         # Verify the request contains the safety_identifier parameter
         assert "safety_identifier" in request_body
@@ -1798,7 +1803,7 @@ async def test_openai_service_tier_parameter():
     client = AsyncOpenAI(api_key="fake-api-key")
 
     with patch.object(
-        client.chat.completions.with_raw_response, "create"
+        client, "post"
     ) as mock_client:
         try:
             await litellm.acompletion(
@@ -1811,7 +1816,7 @@ async def test_openai_service_tier_parameter():
             print(f"Error: {e}")
 
         mock_client.assert_called_once()
-        request_body = mock_client.call_args.kwargs
+        request_body = mock_client.call_args.kwargs["body"]
 
         # Verify the request contains the service_tier parameter
         assert "service_tier" in request_body, "service_tier should be in request body"
@@ -1829,7 +1834,7 @@ def test_openai_service_tier_parameter_sync():
     client = OpenAI(api_key="fake-api-key")
 
     with patch.object(
-        client.chat.completions.with_raw_response, "create"
+        client, "post"
     ) as mock_client:
         try:
             litellm.completion(
@@ -1842,7 +1847,7 @@ def test_openai_service_tier_parameter_sync():
             print(f"Error: {e}")
 
         mock_client.assert_called_once()
-        request_body = mock_client.call_args.kwargs
+        request_body = mock_client.call_args.kwargs["body"]
 
         # Verify the request contains the service_tier parameter
         assert "service_tier" in request_body, "service_tier should be in request body"
@@ -1874,3 +1879,109 @@ def test_responses_gpt54_with_xhigh_reasoning():
         assert request_body["model"] == "openai/gpt-5.4"
 
         assert request_body["reasoning"] == {"effort": "xhigh"}
+
+
+_CHAT_RESPONSE_JSON: Final = {
+    "id": "chatcmpl-wire",
+    "object": "chat.completion",
+    "created": 1,
+    "model": "gpt-5.4",
+    "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+}
+_WIRE_REQUEST: Final = {
+    "model": "gpt-5.4",
+    "messages": [
+        {"role": "system", "content": "sys"},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "what is in the image"},
+                {"type": "image_url", "image_url": {"url": "https://example.com/a.png", "detail": "low"}},
+            ],
+        },
+    ],
+    "tools": [{"type": "function", "function": {"name": "f", "parameters": {"type": "object", "properties": {}}}}],
+    "tool_choice": "auto",
+    "response_format": {"type": "json_schema", "json_schema": {"name": "r", "schema": {"type": "object"}}},
+    "max_completion_tokens": 7,
+    "reasoning_effort": "none",
+    "n": 2,
+    "seed": 3,
+}
+
+
+@pytest.mark.parametrize("is_async", (False, True))
+@respx.mock
+async def test_chat_completion_sends_the_caller_params_extra_body_and_extra_headers_unchanged(
+    is_async: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(litellm, "disable_aiohttp_transport", True)
+    route: Final = respx.post("https://api.openai.com/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json=_CHAT_RESPONSE_JSON)
+    )
+    kwargs: Final = {
+        **_WIRE_REQUEST,
+        "model": "openai/gpt-5.4",
+        "api_base": "https://api.openai.com/v1",
+        "api_key": "sk-test",
+        "num_retries": 0,
+        "extra_body": {"vendor_flag": True},
+        "extra_headers": {"x-caller": "unit"},
+    }
+
+    if is_async:
+        await litellm.acompletion(**kwargs)
+    else:
+        litellm.completion(**kwargs)
+
+    sent: Final = route.calls.last.request
+    assert json.loads(sent.content) == {**_WIRE_REQUEST, "vendor_flag": True}
+    assert sent.headers["x-caller"] == "unit"
+    assert sent.headers["authorization"] == "Bearer sk-test"
+
+
+_SDK_READS_OPENAI_ADMIN_KEY: Final = "admin_api_key" in inspect.signature(AsyncOpenAI.__init__).parameters
+
+
+@pytest.mark.skipif(not _SDK_READS_OPENAI_ADMIN_KEY, reason="openai<3 has no OPENAI_ADMIN_KEY fallback to leak")
+@pytest.mark.asyncio
+async def test_acompletion_never_sends_the_openai_admin_key_for_a_deployment_without_a_key(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_ADMIN_KEY", "sk-admin-only")
+    monkeypatch.setattr(litellm, "api_key", None)
+    monkeypatch.setattr(litellm, "openai_key", None)
+    outbound: Final = asyncio.Queue()
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        outbound.put_nowait(request.headers.get("authorization"))
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-no-admin-key",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "gpt-5.4-mini",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http_client:
+        monkeypatch.setattr(litellm, "aclient_session", http_client)
+        with contextlib.suppress(litellm.AuthenticationError, litellm.InternalServerError):
+            await asyncio.wait_for(
+                litellm.acompletion(
+                    model="openai/gpt-5.4-mini",
+                    api_key="",
+                    messages=[{"role": "user", "content": "who signs this request"}],
+                    num_retries=0,
+                    max_retries=0,
+                ),
+                timeout=10,
+            )
+
+    sent: Final = tuple(outbound.get_nowait() for _ in range(outbound.qsize()))
+    assert all(authorization is None for authorization in sent), sent

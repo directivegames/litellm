@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from copy import deepcopy
 from functools import partial
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Final, Literal, Optional, Protocol, Union, cast, get_args
+from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal, Optional, Protocol, Union, cast, get_args
 
 import httpx
 from pydantic import JsonValue
@@ -32,6 +32,7 @@ from litellm.litellm_core_utils.json_fragment_accumulator import JSONFragmentAcc
 from litellm.litellm_core_utils.prompt_templates.factory import (
     encode_tool_call_id_with_signature,
 )
+from litellm.litellm_core_utils.tool_fields import tool_params_without_hosted_mcp
 from litellm.llms.base_llm.chat.transformation import BaseConfig, BaseLLMException
 from litellm.llms.custom_httpx.http_handler import (
     AsyncHTTPHandler,
@@ -40,6 +41,7 @@ from litellm.llms.custom_httpx.http_handler import (
     get_httpx_client,
 )
 from litellm.types.llms.anthropic import AnthropicThinkingParam
+from litellm.types.llms.base import CachedTokensDetails
 from litellm.types.llms.gemini import BidiGenerateContentServerMessage
 from litellm.types.llms.openai import (
     AllMessageValues,
@@ -277,6 +279,8 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
 
     Note: Please make sure to modify the default parameters as required for your use case.
     """
+
+    _route: ClassVar[str] = "vertex_ai"
 
     temperature: float | None = None
     max_output_tokens: int | None = None
@@ -1244,9 +1248,12 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
         model: str,
         drop_params: bool,
     ) -> dict:
-        self._apply_include_server_side_tool_invocations(non_default_params, optional_params)
+        request_params: Final = tool_params_without_hosted_mcp(
+            non_default_params, model=model, route=self._route, drop_params=drop_params
+        )
+        self._apply_include_server_side_tool_invocations(request_params, optional_params)
         gemini_sampling_params_warned: bool = False
-        for param, value in non_default_params.items():
+        for param, value in request_params.items():
             if param == "temperature":
                 if VertexGeminiConfig._is_gemini_3_or_newer(model):
                     if value is not None and value < 1.0:
@@ -1316,7 +1323,7 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
                 if _tool_choice_value is not None:
                     optional_params["tool_choice"] = _tool_choice_value
             elif param == "parallel_tool_calls":
-                tools_list = non_default_params.get("tools", non_default_params.get("functions"))
+                tools_list = request_params.get("tools", request_params.get("functions"))
                 num_tools = len(tools_list) if isinstance(tools_list, list) else 0
                 # Gemini does not support parallel_tool_calls=False with multiple
                 # tools. Drop the param instead of failing — Responses API clients
@@ -2004,26 +2011,13 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
                 elif modality == "DOCUMENT":
                     cached_text_tokens = (cached_text_tokens or 0) + token_count
 
-        ## Calculate non-cached tokens by subtracting cached from total (per modality)
-        ## This is necessary because promptTokensDetails includes both cached and non-cached tokens
-        ## See: https://github.com/BerriAI/litellm/issues/18750
-        if cached_text_tokens is not None and prompt_text_tokens is not None:
-            # Explicit caching: subtract cached tokens per modality from cacheTokensDetails
-            prompt_text_tokens = prompt_text_tokens - cached_text_tokens
-        elif (
+        if (
             cached_tokens is not None
             and prompt_text_tokens is not None
             and cached_text_tokens is None
             and "cacheTokensDetails" not in usage_metadata
         ):
-            # Implicit caching: only cachedContentTokenCount is provided (no cacheTokensDetails)
-            # Subtract from text tokens since implicit caching is primarily for text content
-            # See: https://github.com/BerriAI/litellm/issues/16341
             prompt_text_tokens = prompt_text_tokens - cached_tokens
-        if cached_audio_tokens is not None and prompt_audio_tokens is not None:
-            prompt_audio_tokens = prompt_audio_tokens - cached_audio_tokens
-        if cached_image_tokens is not None and prompt_image_tokens is not None:
-            prompt_image_tokens = prompt_image_tokens - cached_image_tokens
         if cached_video_tokens is not None and prompt_video_tokens is not None:
             prompt_video_tokens = prompt_video_tokens - cached_video_tokens
 
@@ -2044,9 +2038,24 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
         billable_text_tokens: Final = (
             prompt_text_tokens if prompt_text_tokens is None else prompt_text_tokens + billable_tool_use_prompt_tokens
         )
+        cached_tokens_details_fields: Final = MappingProxyType(
+            {
+                key: token_count
+                for key, token_count in (
+                    ("text_tokens", cached_text_tokens),
+                    ("audio_tokens", cached_audio_tokens),
+                    ("image_tokens", cached_image_tokens),
+                )
+                if token_count is not None
+            }
+        )
+        cached_tokens_details: Final = (
+            CachedTokensDetails.model_validate(cached_tokens_details_fields) if cached_tokens_details_fields else None
+        )
 
         prompt_tokens_details = PromptTokensDetailsWrapper(
             cached_tokens=cached_tokens,
+            cached_tokens_details=cached_tokens_details,
             audio_tokens=prompt_audio_tokens,
             text_tokens=billable_text_tokens,
             image_tokens=prompt_image_tokens,

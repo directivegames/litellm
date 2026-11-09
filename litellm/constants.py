@@ -237,6 +237,9 @@ MCP_PER_USER_TOKEN_EXPIRY_BUFFER_SECONDS: Final = get_env_int("MCP_PER_USER_TOKE
 
 # MCP timeout defaults (seconds). Override via env vars for slow/custom MCP servers.
 MCP_CLIENT_TIMEOUT: Final = get_env_float("LITELLM_MCP_CLIENT_TIMEOUT", 60.0)
+MCP_MAX_SSE_EVENT_SIZE_BYTES: Final = get_env_int_in_range(
+    "LITELLM_MCP_MAX_SSE_EVENT_SIZE_BYTES", 64 * 1024 * 1024, 1, sys.maxsize
+)
 MCP_TOOL_LISTING_TIMEOUT: Final = get_env_float("LITELLM_MCP_TOOL_LISTING_TIMEOUT", 30.0)
 MCP_METADATA_TIMEOUT: Final = get_env_float("LITELLM_MCP_METADATA_TIMEOUT", 10.0)
 MCP_HEALTH_CHECK_TIMEOUT: Final = get_env_float("LITELLM_MCP_HEALTH_CHECK_TIMEOUT", 10.0)
@@ -446,6 +449,7 @@ REDIS_DAILY_END_USER_SPEND_UPDATE_BUFFER_KEY: Final = "litellm_daily_end_user_sp
 REDIS_DAILY_AGENT_SPEND_UPDATE_BUFFER_KEY: Final = "litellm_daily_agent_spend_update_buffer"
 REDIS_DAILY_TAG_SPEND_UPDATE_BUFFER_KEY: Final = "litellm_daily_tag_spend_update_buffer"
 REDIS_WINDOW_SPEND_UPDATE_BUFFER_KEY: Final = "litellm_window_spend_update_buffer"
+REDIS_TOOL_DISCOVERY_BUFFER_KEY: Final = "litellm_tool_discovery_buffer"
 MAX_REDIS_BUFFER_DEQUEUE_COUNT: Final = get_env_int("MAX_REDIS_BUFFER_DEQUEUE_COUNT", 100)
 REDIS_SPEND_LOGS_BUFFER_KEY: Final = "litellm_spend_logs_buffer"
 REDIS_SPEND_LOGS_BUFFER_MAX_ROWS: Final = 100000
@@ -701,6 +705,7 @@ DD_TRACER_STREAMING_CHUNK_YIELD_RESOURCE: Final = os.getenv(
 )
 
 LITELLM_HTTP_STATUS_CLIENT_DISCONNECTED: Final = 499
+LITELLM_CLIENT_DISCONNECT_DETAIL: Final = "Client disconnected the request"
 
 EMAIL_BUDGET_ALERT_TTL: Final = get_env_int("EMAIL_BUDGET_ALERT_TTL", 24 * 60 * 60)  # 24 hours in seconds
 EMAIL_BUDGET_ALERT_MAX_SPEND_ALERT_PERCENTAGE: Final = get_env_float(
@@ -1810,6 +1815,7 @@ LITELLM_UI_SESSION_DURATION: Final = os.getenv("LITELLM_UI_SESSION_DURATION", "2
 
 ########################### DB CRON JOB NAMES ###########################
 DB_SPEND_UPDATE_JOB_NAME: Final = "db_spend_update_job"
+TOOL_DISCOVERY_COMMIT_JOB_NAME: Final = "tool_discovery_commit_job"
 DB_DAILY_TAG_SPEND_UPDATE_JOB_NAME: Final = "db_daily_tag_spend_update_job"
 PROMETHEUS_EMIT_BUDGET_METRICS_JOB_NAME: Final = "prometheus_emit_budget_metrics"
 CLOUDZERO_EXPORT_USAGE_DATA_JOB_NAME: Final = "cloudzero_export_usage_data"
@@ -1988,6 +1994,7 @@ SPEND_LOG_KEY_METADATA_CACHE_TTL: Final = 600
 SPEND_LOG_KEY_METADATA_MISS_CACHE_TTL: Final = 30
 SPEND_LOG_KEY_METADATA_CACHE_MAX_ITEMS: Final = 10000
 SPEND_LOG_KEY_METADATA_QUERY_TIMEOUT_MS: Final = 5000
+SPEND_LOG_READ_STATEMENT_TIMEOUT_SECONDS: Final = 30
 SPEND_LOG_KEY_METADATA_ROWS_PER_PROBE: Final = 100
 # Short TTL for negative MCP access-group existence lookups. Keeps unauthenticated
 # callers from forcing a DB query per request for unknown names, while bounding
